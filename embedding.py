@@ -21,14 +21,18 @@ class Embedder:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device: {self.device}")
 
-        # Загрузка модели с использованием token, если предоставлен
-        if HF_TOKEN:
-            self.model = SentenceTransformer(EMBEDDING_MODEL, use_auth_token=HF_TOKEN)
-        else:
+        # Загрузка модели БЕЗ токена
+        try:
             self.model = SentenceTransformer(EMBEDDING_MODEL)
+            logger.info(f"Model {EMBEDDING_MODEL} loaded successfully without token")
+        except Exception as e:
+            logger.error(f"Error loading model {EMBEDDING_MODEL}: {e}")
+            logger.info("Trying fallback model all-MiniLM-L6-v2")
+            self.model = SentenceTransformer("all-MiniLM-L6-v2")
+            logger.info("Fallback model loaded successfully")
 
         self.model.to(self.device)
-        logger.info(f"Embedding model loaded successfully")
+        logger.info(f"Embedding model loaded successfully on {self.device}")
 
     def create_embeddings(self, texts: List[str]) -> List[List[float]]:
         """

@@ -20,13 +20,17 @@ class LanguageModel:
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device: {self.device}")
 
-        # Загрузка модели с использованием token, если предоставлен
-        if HF_TOKEN:
-            self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, use_auth_token=HF_TOKEN)
-            self.model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, use_auth_token=HF_TOKEN)
-        else:
+        # Загрузка модели БЕЗ токена
+        try:
             self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
             self.model = AutoModelForCausalLM.from_pretrained(MODEL_NAME)
+            logger.info(f"Model {MODEL_NAME} loaded successfully without token")
+        except Exception as e:
+            logger.error(f"Error loading model {MODEL_NAME}: {e}")
+            logger.info("Trying fallback model 'gpt2'")
+            self.tokenizer = AutoTokenizer.from_pretrained("gpt2")
+            self.model = AutoModelForCausalLM.from_pretrained("gpt2")
+            logger.info("Fallback model loaded successfully")
 
         self.model.to(self.device)
         self.pipe = pipeline(
@@ -38,7 +42,7 @@ class LanguageModel:
             device=0 if self.device == "cuda" else -1
         )
 
-        logger.info(f"Language model loaded successfully")
+        logger.info(f"Language model loaded successfully on {self.device}")
 
     def create_prompt(self, product_text: str, context_documents: List[Dict[str, Any]]) -> str:
         """

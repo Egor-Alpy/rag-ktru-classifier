@@ -18,7 +18,7 @@ KTRU_SYNC_INTERVAL = int(os.getenv("KTRU_SYNC_INTERVAL", 3600))  # в секун
 # Настройки Qdrant
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = "ktru_vectors"
-VECTOR_DIM = 312  # Размерность вектора для rubert-tiny2-sentence
+VECTOR_DIM = 384  # Размерность вектора для rubert-tiny2-sentence
 
 # Настройки API
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
