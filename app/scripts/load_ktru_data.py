@@ -2,8 +2,8 @@ import json
 import argparse
 import os
 from tqdm import tqdm
-from app.embedding import EmbeddingModel
-from app.database import VectorDatabase
+from .app.embedding import EmbeddingModel
+from .app.database import VectorDatabase
 
 
 def load_ktru_data(file_path):
