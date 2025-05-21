@@ -1,5 +1,5 @@
 # Базовый образ с CUDA 11.8 и PyTorch
-FROM pytorch/pytorch:2.0.1-cuda11.8.0-cudnn8-runtime
+FROM runpod/pytorch:2.0.1-py3.10-cuda11.8.0-devel-ubuntu22.04
 
 WORKDIR /app
 
