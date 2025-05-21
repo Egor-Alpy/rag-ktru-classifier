@@ -69,6 +69,20 @@ echo "Все сервисы запущены. Для мониторинга ис
 
 # Бесконечный цикл для поддержания контейнера активным
 while true; do
+
+        # Добавить проверку наличия curl
+    if ! command -v curl &> /dev/null; then
+        echo "curl не установлен, устанавливаем..."
+        apt-get update && apt-get install -y curl
+    fi
+
+    # Добавить проверку MongoDB
+    echo "Проверка доступности MongoDB..."
+    if ! mongosh --eval "db.adminCommand('ping')" > /dev/null; then
+        echo "MongoDB не доступна. Запускаем..."
+        mongod --fork --logpath /workspace/logs/mongodb.log
+    fi
+
     # Проверка, что процессы все еще работают
     if ! ps -p $SYNC_PID > /dev/null; then
         echo "Процесс синхронизации остановлен. Перезапуск..."

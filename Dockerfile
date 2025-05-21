@@ -1,12 +1,11 @@
 FROM runpod/pytorch:2.1.0-py3.10-cuda12.1.0
 
 # Установка системных зависимостей
-RUN apt-get update && apt-get install -y \
+RUN apt-get install -y \
     git \
     wget \
     curl \
     supervisor \
-    mongodb \
     && rm -rf /var/lib/apt/lists/*
 
 # Установка рабочей директории
@@ -26,9 +25,6 @@ RUN curl -L https://github.com/qdrant/qdrant/releases/download/v1.7.4/qdrant-x86
     && tar -xzf qdrant.tar.gz -C /workspace \
     && rm qdrant.tar.gz
 
-# Настройка MongoDB
-RUN mkdir -p /data/db && \
-    chown -R mongodb:mongodb /data/db
 
 # Копирование скриптов и конфигурации
 COPY *.py /workspace/
