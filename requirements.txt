@@ -1,16 +1,10 @@
-# Основные библиотеки
-transformers==4.30.2
+fastapi==0.103.1
+uvicorn==0.23.2
+pydantic==2.3.0
+transformers==4.33.1
+torch==2.1.0
 sentence-transformers==2.2.2
-torch==2.0.1
-qdrant-client==1.4.0
-pymongo==4.4.1
-fastapi==0.100.0
-uvicorn==0.22.0
-pydantic==1.10.10
+chromadb==0.4.18
+numpy==1.25.2
+tqdm==4.66.1
 python-dotenv==1.0.0
-
-# Дополнительные библиотеки
-numpy==1.24.3
-apscheduler==3.10.1
-tqdm==4.65.0
-scikit-learn==1.2.2
