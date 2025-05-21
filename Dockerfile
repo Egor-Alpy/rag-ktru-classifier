@@ -24,7 +24,8 @@ COPY llm/requirements.txt llm-requirements.txt
 
 RUN pip install --no-cache-dir -r api-requirements.txt && \
     pip install --no-cache-dir -r embedding-requirements.txt && \
-    pip install --no-cache-dir -r llm-requirements.txt
+    pip install --no-cache-dir -r llm-requirements.txt && \
+    pip install --no-cache-dir pydantic-settings==2.0.0
 
 # Копирование кода всех сервисов
 COPY api/ ./api/
@@ -35,13 +36,19 @@ COPY scripts/ ./scripts/
 # Создание директорий для данных
 RUN mkdir -p /app/data
 
+# Создание файлов __init__.py для корректной работы модулей
+RUN touch /app/api/__init__.py /app/api/app/__init__.py \
+    /app/embeddings/__init__.py /app/embeddings/app/__init__.py \
+    /app/llm/__init__.py /app/llm/app/__init__.py
+
+# Копирование конфигурации .env
+COPY .env /app/.env
+COPY .env /app/api/.env
+COPY .env /app/embeddings/.env
+COPY .env /app/llm/.env
+
 # Конфигурация supervisor для управления процессами
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-
-# Переопределение URL-адресов в конфигурационных файлах для работы с localhost
-RUN sed -i 's|http://embeddings:8080|http://localhost:8080|g' api/app/config.py && \
-    sed -i 's|http://llm:8081|http://localhost:8081|g' api/app/config.py && \
-    sed -i 's|qdrant_host: str = "qdrant"|qdrant_host: str = "localhost"|g' api/app/config.py
 
 # Открываем необходимые порты
 EXPOSE 6333 6334 8000 8080 8081

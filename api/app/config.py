@@ -1,5 +1,5 @@
 from typing import Optional
-from pydantic-settings import BaseSettings
+from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
@@ -21,5 +21,8 @@ class Settings(BaseSettings):
     search_top_k: int = 5
     similarity_threshold: float = 0.6
 
-    class Config:
-        env_file = ".env"
+    model_config = {
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+        "extra": "ignore"  # Allow extra fields to be provided without validation errors
+    }
