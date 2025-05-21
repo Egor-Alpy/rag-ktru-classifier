@@ -2,9 +2,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-from app.config import Settings
-from app.models.sku import SKUModel, ClassificationResult
-from app.services.classifier import KTRUClassifier
+from .config import Settings
+from .models.sku import SKUModel, ClassificationResult
+from .services.classifier import KTRUClassifier
 
 # Загрузка конфигурации
 settings = Settings()

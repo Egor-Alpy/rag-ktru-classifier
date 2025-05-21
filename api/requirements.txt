@@ -8,3 +8,4 @@ qdrant-client==1.5.4
 python-dotenv==1.0.0
 loguru==0.7.2
 pymongo==4.5.0
+pydantic-settings==2.0.0
