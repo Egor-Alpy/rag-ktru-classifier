@@ -1,0 +1,10 @@
+# api/requirements.txt
+fastapi==0.103.2
+uvicorn==0.23.2
+pydantic==2.4.2
+httpx==0.25.0
+langchain==0.0.311
+qdrant-client==1.5.4
+python-dotenv==1.0.0
+loguru==0.7.2
+pymongo==4.5.0
