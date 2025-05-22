@@ -71,6 +71,7 @@ class SKUItem(BaseModel):
 
 class ClassificationResponse(BaseModel):
     ktru_code: str
+    ktru_title: Optional[str] = None  # Добавлено поле для названия КТРУ
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     processing_time: float
 
@@ -110,19 +111,30 @@ async def classify_item(sku: SKUItem):
         # Вычисляем время обработки
         processing_time = time.time() - start_time
 
-        # Формируем ответ
-        if result == "код не найден":
-            return ClassificationResponse(
-                ktru_code="код не найден",
-                confidence=0.0,
-                processing_time=processing_time
-            )
+        # Обрабатываем результат классификации
+        if isinstance(result, dict):
+            # Новый формат возврата с кодом и названием
+            ktru_code = result.get('ktru_code', 'код не найден')
+            ktru_title = result.get('ktru_title', None)
+            confidence = result.get('confidence', 1.0 if ktru_code != 'код не найден' else 0.0)
+        elif isinstance(result, str):
+            # Старый формат (обратная совместимость)
+            ktru_code = result
+            ktru_title = None
+            confidence = 1.0 if result != "код не найден" else 0.0
         else:
-            return ClassificationResponse(
-                ktru_code=result,
-                confidence=1.0,
-                processing_time=processing_time
-            )
+            # Неожиданный формат
+            ktru_code = "код не найден"
+            ktru_title = None
+            confidence = 0.0
+
+        # Формируем ответ
+        return ClassificationResponse(
+            ktru_code=ktru_code,
+            ktru_title=ktru_title,
+            confidence=confidence,
+            processing_time=processing_time
+        )
 
     except Exception as e:
         logger.error(f"Ошибка при обработке запроса: {e}")

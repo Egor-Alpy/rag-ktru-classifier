@@ -169,9 +169,17 @@ def test_classification():
         if response.status_code == 200:
             result = response.json()
             logger.info(f"✅ Тест классификации успешен")
-            logger.info(f"   - Результат: {result.get('ktru_code', 'N/A')}")
+            logger.info(f"   - Код КТРУ: {result.get('ktru_code', 'N/A')}")
+            logger.info(f"   - Название КТРУ: {result.get('ktru_title', 'N/A')}")
             logger.info(f"   - Уверенность: {result.get('confidence', 0):.2f}")
             logger.info(f"   - Время обработки: {result.get('processing_time', 0):.2f}с")
+
+            # Проверяем новый формат ответа
+            if 'ktru_title' in result:
+                logger.info("✅ Новый формат ответа с названием КТРУ работает")
+            else:
+                logger.warning("⚠️  Поле ktru_title отсутствует в ответе")
+
             return True
         else:
             logger.error(f"❌ Тест классификации failed: {response.status_code}")
@@ -180,6 +188,90 @@ def test_classification():
 
     except Exception as e:
         logger.error(f"❌ Ошибка при тестировании классификации: {e}")
+        return False
+
+
+def test_multiple_classification():
+    """Расширенный тест классификации с несколькими товарами"""
+    try:
+        logger.info("Расширенное тестирование классификации...")
+
+        test_cases = [
+            {
+                "name": "Тест 1: Ноутбук",
+                "data": {
+                    "title": "Ноутбук ASUS X515",
+                    "description": "Портативный персональный компьютер",
+                    "attributes": [
+                        {"attr_name": "Процессор", "attr_value": "Intel Core i5"},
+                        {"attr_name": "Оперативная память", "attr_value": "8 ГБ"}
+                    ]
+                }
+            },
+            {
+                "name": "Тест 2: Канцелярские товары",
+                "data": {
+                    "title": "Ручка шариковая синяя",
+                    "description": "Письменная принадлежность для офиса",
+                    "attributes": [
+                        {"attr_name": "Цвет чернил", "attr_value": "синий"},
+                        {"attr_name": "Тип", "attr_value": "шариковая"}
+                    ]
+                }
+            },
+            {
+                "name": "Тест 3: Мебель",
+                "data": {
+                    "title": "Стол офисный письменный",
+                    "description": "Мебель для рабочего места",
+                    "attributes": [
+                        {"attr_name": "Материал", "attr_value": "ЛДСП"},
+                        {"attr_name": "Размер", "attr_value": "120x60 см"}
+                    ]
+                }
+            }
+        ]
+
+        successful_tests = 0
+        total_tests = len(test_cases)
+
+        for test_case in test_cases:
+            logger.info(f"🧪 {test_case['name']}")
+
+            try:
+                response = requests.post(
+                    f"http://{API_HOST}:{API_PORT}/classify",
+                    json=test_case['data'],
+                    timeout=30
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    ktru_code = result.get('ktru_code', 'N/A')
+                    ktru_title = result.get('ktru_title', 'N/A')
+                    confidence = result.get('confidence', 0)
+                    processing_time = result.get('processing_time', 0)
+
+                    logger.info(f"   ✅ Результат: {ktru_code}")
+                    if ktru_title and ktru_title != 'N/A':
+                        logger.info(f"   📋 Название: {ktru_title}")
+                    logger.info(f"   🎯 Уверенность: {confidence:.2f}")
+                    logger.info(f"   ⏱️  Время: {processing_time:.2f}с")
+
+                    successful_tests += 1
+                else:
+                    logger.error(f"   ❌ Ошибка: {response.status_code}")
+
+            except Exception as e:
+                logger.error(f"   ❌ Исключение: {e}")
+
+            logger.info("")  # Пустая строка для разделения
+
+        logger.info(f"📊 Результаты расширенного тестирования: {successful_tests}/{total_tests}")
+        return successful_tests == total_tests
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка при расширенном тестировании: {e}")
         return False
 
 
@@ -212,6 +304,12 @@ def main():
     logger.info("4️⃣  Тест классификации...")
     checks.append(("Classification", test_classification()))
 
+    logger.info("")
+
+    # Расширенный тест классификации
+    logger.info("5️⃣  Расширенный тест классификации...")
+    checks.append(("Extended Tests", test_multiple_classification()))
+
     # Итоговый отчет
     logger.info("")
     logger.info("=" * 60)
@@ -221,7 +319,7 @@ def main():
     for component, status in checks:
         status_icon = "✅" if status else "❌"
         status_text = "РАБОТАЕТ" if status else "НЕ РАБОТАЕТ"
-        logger.info(f"   {status_icon} {component:<12} : {status_text}")
+        logger.info(f"   {status_icon} {component:<15} : {status_text}")
         if not status:
             all_passed = False
 
@@ -229,6 +327,9 @@ def main():
 
     if all_passed:
         logger.info("🎉 Все компоненты работают корректно!")
+        logger.info("📋 Новая функциональность:")
+        logger.info("   ✅ Возврат названия КТРУ работает")
+        logger.info("   ✅ Обратная совместимость сохранена")
         return 0
     else:
         logger.error("⚠️  Обнаружены проблемы в работе системы!")

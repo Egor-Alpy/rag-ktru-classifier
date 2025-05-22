@@ -187,7 +187,7 @@ class KtruClassifier:
 
         # Добавляем похожие записи КТРУ в промпт
         for i, entry in enumerate(similar_ktru_entries, 1):
-            payload = entry.payload  # ИСПРАВЛЕНО: получаем payload как атрибут
+            payload = entry.payload  # Получаем payload как атрибут
             prompt += f"\n{i}. Код: {payload.get('ktru_code', '')}, Название: {payload.get('title', '')}\n"
 
             if payload.get('description'):
@@ -209,11 +209,45 @@ class KtruClassifier:
 
         return prompt
 
+    def _find_ktru_title_by_code(self, ktru_code, search_results):
+        """Поиск названия КТРУ по коду в результатах поиска"""
+        try:
+            for entry in search_results:
+                payload = entry.payload
+                if payload.get('ktru_code') == ktru_code:
+                    return payload.get('title', '')
+
+            # Если не найдено в результатах поиска, попробуем найти в базе
+            if self.qdrant_client:
+                search_result = self.qdrant_client.scroll(
+                    collection_name=QDRANT_COLLECTION,
+                    scroll_filter={
+                        "must": [
+                            {
+                                "key": "ktru_code",
+                                "match": {"value": ktru_code}
+                            }
+                        ]
+                    },
+                    limit=1,
+                    with_payload=True,
+                    with_vectors=False
+                )
+
+                if search_result[0]:  # Если есть результаты
+                    return search_result[0][0].payload.get('title', '')
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Ошибка при поиске названия КТРУ: {e}")
+            return None
+
     def classify_sku(self, sku_data, top_k=TOP_K):
         """Классификация SKU по КТРУ коду"""
         if not self.qdrant_client:
             logger.error("Qdrant клиент не инициализирован")
-            return "код не найден"
+            return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
 
         if not self.llm or not self.tokenizer:
             logger.error("LLM модель не инициализирована")
@@ -245,7 +279,7 @@ class KtruClassifier:
 
             if not search_result:
                 logger.warning("Не найдено похожих КТРУ записей")
-                return "код не найден"
+                return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
 
             # Создаем промпт с извлеченным контекстом
             prompt = self.create_prompt(sku_data, search_result)
@@ -283,22 +317,34 @@ class KtruClassifier:
             ktru_match = self.ktru_pattern.search(response)
 
             if ktru_match:
-                return ktru_match.group(0)
+                ktru_code = ktru_match.group(0)
+                ktru_title = self._find_ktru_title_by_code(ktru_code, search_result)
+                return {
+                    "ktru_code": ktru_code,
+                    "ktru_title": ktru_title,
+                    "confidence": 1.0
+                }
             elif "код не найден" in response.lower():
-                return "код не найден"
+                return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
             else:
                 # Попытка извлечь код из ответа построчно
                 lines = response.split('\n')
                 for line in lines:
                     ktru_match = self.ktru_pattern.search(line)
                     if ktru_match:
-                        return ktru_match.group(0)
+                        ktru_code = ktru_match.group(0)
+                        ktru_title = self._find_ktru_title_by_code(ktru_code, search_result)
+                        return {
+                            "ktru_code": ktru_code,
+                            "ktru_title": ktru_title,
+                            "confidence": 1.0
+                        }
 
-                return "код не найден"
+                return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
 
         except Exception as e:
             logger.error(f"Ошибка при классификации SKU: {e}")
-            return "код не найден"
+            return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
 
     def _classify_by_similarity_only(self, sku_data, top_k=TOP_K):
         """Fallback классификация только по схожести эмбеддингов"""
@@ -330,19 +376,24 @@ class KtruClassifier:
                 confidence = best_match.score
 
                 # Устанавливаем порог схожести
-                if confidence > 0.75:  # Высокая схожесть (ПОНИЖЕН С 0.8)
+                if confidence > 0.75:  # Высокая схожесть
                     logger.info(f"Найдено совпадение по схожести: {confidence:.3f}")
-                    return best_match.payload.get('ktru_code',
-                                                  'код не найден')
+                    ktru_code = best_match.payload.get('ktru_code', 'код не найден')
+                    ktru_title = best_match.payload.get('title', None)
+                    return {
+                        "ktru_code": ktru_code,
+                        "ktru_title": ktru_title,
+                        "confidence": confidence
+                    }
                 else:
                     logger.info(f"Схожесть слишком низкая: {confidence:.3f}")
-                    return "код не найден"
+                    return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
             else:
-                return "код не найден"
+                return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
 
         except Exception as e:
             logger.error(f"Ошибка в fallback классификации: {e}")
-            return "код не найден"
+            return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
 
 
 # Создаем глобальный экземпляр классификатора
