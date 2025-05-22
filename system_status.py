@@ -4,11 +4,19 @@
 """
 
 import sys
+import os
 import time
 import requests
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 import logging
+
+# Переходим в директорию проекта, если нужно
+project_dir = "/workspace/rag-ktru-classifier"
+if os.path.exists(project_dir) and os.getcwd() != project_dir:
+    os.chdir(project_dir)
+    print(f"Переход в директорию проекта: {project_dir}")
+
 from config import (
     QDRANT_HOST, QDRANT_PORT, QDRANT_COLLECTION,
     API_HOST, API_PORT

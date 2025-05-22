@@ -1,14 +1,42 @@
 #!/bin/bash
 
-# Создание необходимых директорий
-mkdir -p /workspace/logs
+# Получаем текущую директорию
+CURRENT_DIR=$(pwd)
+PROJECT_DIR="/workspace/rag-ktru-classifier"
 
-echo "🚀 Запуск сервисов классификации КТРУ..."
+# Переходим в директорию проекта, если не в ней
+if [ "$CURRENT_DIR" != "$PROJECT_DIR" ]; then
+    echo "🔄 Переход в директорию проекта: $PROJECT_DIR"
+    cd "$PROJECT_DIR" || {
+        echo "❌ Ошибка: Не удалось перейти в $PROJECT_DIR"
+        exit 1
+    }
+fi
+
+# Создание необходимых директорий
+mkdir -p logs qdrant_storage models data
+
+echo "🚀 Запуск сервисов классификации КТРУ из $PROJECT_DIR..."
+
+# Проверка наличия Qdrant в проекте
+if [ ! -f "./qdrant" ]; then
+    echo "📥 Qdrant не найден. Загружаем..."
+    curl -L https://github.com/qdrant/qdrant/releases/download/v1.7.4/qdrant-x86_64-unknown-linux-gnu.tar.gz -o qdrant.tar.gz
+    tar -xzf qdrant.tar.gz
+    rm qdrant.tar.gz
+    chmod +x qdrant
+fi
 
 # Добавить проверку наличия curl
 if ! command -v curl &> /dev/null; then
-    echo "curl не установлен, устанавливаем..."
+    echo "📦 curl не установлен, устанавливаем..."
     apt-get update && apt-get install -y curl
+fi
+
+# Проверяем, что Python зависимости установлены
+if ! python -c "import fastapi" 2>/dev/null; then
+    echo "📦 Python зависимости не установлены. Устанавливаем..."
+    pip install -r requirements.txt
 fi
 
 # Функция для проверки состояния Qdrant
@@ -23,10 +51,8 @@ check_qdrant_status() {
             echo "✅ Qdrant успешно запущен!"
 
             # Получаем информацию о коллекциях
-            collections_info=$(curl -s http://localhost:6333/collections 2>/dev/null || echo "")
-            if [ ! -z "$collections_info" ]; then
-                echo "📊 Проверка состояния векторной БД..."
-                python3 -c "
+            echo "📊 Проверка состояния векторной БД..."
+            python3 -c "
 import requests
 import json
 
@@ -59,7 +85,6 @@ try:
 except Exception as e:
     print(f'❌ Ошибка при проверке коллекций: {e}')
 " 2>/dev/null || echo "⚠️  Не удалось получить детальную информацию о коллекциях"
-            fi
             return 0
         fi
 
@@ -132,14 +157,13 @@ QDRANT_RUNNING=$(curl -s http://localhost:6333/collections > /dev/null && echo "
 
 if [ "$QDRANT_RUNNING" = "no" ]; then
     echo "🔄 Запуск Qdrant..."
-    cd /workspace
 
     # Проверяем наличие config.yaml, если нет - создаем базовый
-    if [ ! -f "/workspace/config.yaml" ]; then
+    if [ ! -f "./config.yaml" ]; then
         echo "📝 Создание базовой конфигурации Qdrant..."
-        cat > /workspace/config.yaml << EOL
+        cat > ./config.yaml << EOL
 storage:
-  storage_path: /workspace/qdrant_storage
+  storage_path: $PROJECT_DIR/qdrant_storage
 service:
   host: 0.0.0.0
   http_port: 6333
@@ -148,14 +172,14 @@ log_level: INFO
 EOL
     fi
 
-    ./qdrant --config-path /workspace/config.yaml > ./logs/qdrant.log 2>&1 &
+    nohup ./qdrant --config-path ./config.yaml > ./logs/qdrant.log 2>&1 &
     QDRANT_PID=$!
 
     # Проверка запуска Qdrant с детальной информацией
     if ! check_qdrant_status; then
         echo "❌ Критическая ошибка: Qdrant не запустился"
         echo "📋 Логи Qdrant:"
-        tail -20 /workspace/logs/qdrant.log
+        tail -20 ./logs/qdrant.log
         exit 1
     fi
 else
@@ -164,9 +188,9 @@ else
 fi
 
 # Создаем .env файл, если нужно
-if [ ! -f "/workspace/.env" ]; then
+if [ ! -f "./.env" ]; then
     echo "📝 Создание .env файла..."
-    cat > /workspace/.env << EOL
+    cat > ./.env << EOL
 QDRANT_HOST=localhost
 QDRANT_PORT=6333
 QDRANT_COLLECTION=ktru_codes
@@ -189,15 +213,15 @@ TOP_K=5
 EOL
 fi
 
-# Запуск синхронизации с MongoDB в фоновом режиме (если MongoDB доступна)
+# Запуск синхронизации с MongoDB в фоновом режиме
 echo "🔄 Попытка запуска синхронизации с MongoDB..."
-python /workspace/mongodb_sync.py > /workspace/logs/mongodb_sync.log 2>&1 &
+nohup python ./mongodb_sync.py > ./logs/mongodb_sync.log 2>&1 &
 SYNC_PID=$!
 echo "✅ Процесс синхронизации запущен с PID: $SYNC_PID"
 
 # Запуск API сервиса
 echo "🔄 Запуск API-сервиса..."
-python /workspace/api.py > /workspace/logs/api.log 2>&1 &
+nohup python ./api.py > ./logs/api.log 2>&1 &
 API_PID=$!
 echo "✅ API-сервис запущен с PID: $API_PID"
 
@@ -207,7 +231,7 @@ sleep 5
 if ! check_api_status; then
     echo "❌ Критическая ошибка: API не запустился"
     echo "📋 Логи API:"
-    tail -20 /workspace/logs/api.log
+    tail -20 ./logs/api.log
     exit 1
 fi
 
@@ -216,7 +240,7 @@ trap 'echo "🛑 Завершение работы..."; kill $SYNC_PID $API_PID 
 
 echo ""
 echo "🎉 Все сервисы успешно запущены!"
-echo "=" * 50
+echo "=================================================="
 echo "📍 Endpoints:"
 echo "   🏥 Health check: http://localhost:8000/health"
 echo "   📊 System status: http://localhost:8000/status"
@@ -224,8 +248,8 @@ echo "   📚 Collections:   http://localhost:8000/collections"
 echo "   🤖 Classify:      http://localhost:8000/classify"
 echo "   🔍 Qdrant:        http://localhost:6333"
 echo ""
-echo "📁 Логи в директории: /workspace/logs/"
-echo "🔧 Для проверки системы: python system_status.py"
+echo "📁 Логи в директории: $PROJECT_DIR/logs/"
+echo "🔧 Для проверки системы: cd $PROJECT_DIR && python system_status.py"
 echo ""
 echo "Для завершения нажмите Ctrl+C"
 
@@ -234,13 +258,13 @@ while true; do
     # Проверка, что процессы все еще работают
     if ! ps -p $SYNC_PID > /dev/null 2>&1; then
         echo "$(date): ⚠️  Процесс синхронизации остановлен. Перезапуск..."
-        python /workspace/mongodb_sync.py > /workspace/logs/mongodb_sync.log 2>&1 &
+        nohup python ./mongodb_sync.py > ./logs/mongodb_sync.log 2>&1 &
         SYNC_PID=$!
     fi
 
     if ! ps -p $API_PID > /dev/null 2>&1; then
         echo "$(date): ⚠️  API-сервис остановлен. Перезапуск..."
-        python /workspace/api.py > /workspace/logs/api.log 2>&1 &
+        nohup python ./api.py > ./logs/api.log 2>&1 &
         API_PID=$!
 
         # Проверяем что API снова заработал

@@ -4,8 +4,21 @@ from dotenv import load_dotenv
 # Загрузка переменных окружения из .env файла, если он существует
 load_dotenv()
 
+# Определяем базовую директорию проекта
+# Если запущено из /workspace/rag-ktru-classifier, используем текущую директорию
+# Если из другого места, пытаемся найти правильный путь
+current_dir = os.getcwd()
+if current_dir.endswith('rag-ktru-classifier'):
+    BASE_DIR = current_dir
+elif os.path.exists('/workspace/rag-ktru-classifier'):
+    BASE_DIR = "/workspace/rag-ktru-classifier"
+else:
+    # Fallback на текущую директорию
+    BASE_DIR = current_dir
+
+print(f"Используется базовая директория: {BASE_DIR}")
+
 # Пути
-BASE_DIR = "/workspace"
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
