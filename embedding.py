@@ -14,23 +14,25 @@ class EmbeddingModel:
     def __init__(self, model_name=EMBEDDING_MODEL):
         """Инициализация модели для создания эмбеддингов"""
         logger.info(f"Загрузка модели эмбеддингов: {model_name}")
+
+        # Определяем устройство
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        logger.info(f"Используемое устройство: {self.device}")
+
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModel.from_pretrained(model_name)
         self.model.eval()  # Режим оценки
 
-        # Если доступен CUDA, переносим модель на GPU
-        if torch.cuda.is_available():
-            logger.info("Используем CUDA для модели эмбеддингов")
-            self.model = self.model.cuda()
+        # Переносим модель на нужное устройство
+        self.model = self.model.to(self.device)
 
-        self.device = self.model.device
         logger.info(f"Модель эмбеддингов загружена на устройство: {self.device}")
 
     def generate_embedding(self, text):
         """Генерирует эмбеддинг для текста"""
         if not text or text.strip() == "":
             logger.warning("Получен пустой текст для эмбеддинга")
-            # Возвращаем нулевой вектор
+            # Возвращаем нулевой вектор правильной размерности
             return np.zeros(312)
 
         try:
@@ -55,8 +57,19 @@ class EmbeddingModel:
             if embedding.ndim > 1 and embedding.shape[0] == 1:
                 embedding = embedding[0]
 
+            # Проверяем размерность и обрезаем/дополняем до 312 если нужно
+            if len(embedding) != 312:
+                if len(embedding) > 312:
+                    embedding = embedding[:312]
+                else:
+                    # Дополняем нулями до 312
+                    padding = np.zeros(312 - len(embedding))
+                    embedding = np.concatenate([embedding, padding])
+
             # Нормализуем вектор
-            embedding = embedding / np.linalg.norm(embedding)
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
 
             return embedding
 

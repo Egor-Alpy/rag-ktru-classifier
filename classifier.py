@@ -51,10 +51,22 @@ class KtruClassifier:
             tokenizer.pad_token = tokenizer.eos_token
 
             logger.info(f"Загрузка адаптера модели: {LLM_ADAPTER_MODEL}")
+
+            # Определяем тип данных в зависимости от поддержки
+            if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
+                torch_dtype = torch.bfloat16
+                logger.info("Используется bfloat16")
+            elif torch.cuda.is_available():
+                torch_dtype = torch.float16
+                logger.info("Используется float16 (bfloat16 не поддерживается)")
+            else:
+                torch_dtype = torch.float32
+                logger.info("Используется float32 (CPU режим)")
+
             model = AutoPeftModelForCausalLM.from_pretrained(
                 LLM_ADAPTER_MODEL,
                 device_map="auto",
-                torch_dtype=torch.bfloat16
+                torch_dtype=torch_dtype
             )
 
             return model, tokenizer

@@ -1,9 +1,30 @@
 #!/bin/bash
 
-# Создание лог-директории
+# Создание необходимых директорий
 mkdir -p /workspace/logs
+mkdir -p /workspace/config
+
+# Создаем конфигурационный файл Qdrant, если его нет
+if [ ! -f "/workspace/config.yaml" ]; then
+    echo "Создание конфигурации Qdrant..."
+    cat > /workspace/config.yaml << EOL
+storage:
+  storage_path: /workspace/qdrant_storage
+service:
+  host: 0.0.0.0
+  http_port: 6333
+  grpc_port: 6334
+log_level: INFO
+EOL
+fi
 
 echo "Запуск сервисов классификации КТРУ..."
+
+# Добавить проверку наличия curl
+if ! command -v curl &> /dev/null; then
+    echo "curl не установлен, устанавливаем..."
+    apt-get update && apt-get install -y curl
+fi
 
 # Проверка доступности Qdrant
 QDRANT_RUNNING=$(curl -s http://localhost:6333/collections > /dev/null && echo "yes" || echo "no")
@@ -11,7 +32,7 @@ QDRANT_RUNNING=$(curl -s http://localhost:6333/collections > /dev/null && echo "
 if [ "$QDRANT_RUNNING" = "no" ]; then
     echo "Запуск Qdrant..."
     cd /workspace
-    ./qdrant --config-path ./config/config.yaml > ./logs/qdrant.log 2>&1 &
+    ./qdrant --config-path /workspace/config.yaml > ./logs/qdrant.log 2>&1 &
 
     # Проверка запуска Qdrant
     echo "Ожидание запуска Qdrant..."
@@ -47,11 +68,23 @@ MONGO_DB_NAME=${MONGO_DB_NAME:-ktru_database}
 MONGO_COLLECTION=${MONGO_COLLECTION:-ktru_collection}
 API_HOST=0.0.0.0
 API_PORT=8000
+EMBEDDING_MODEL=cointegrated/rubert-tiny2
+LLM_BASE_MODEL=Open-Orca/Mistral-7B-OpenOrca
+LLM_ADAPTER_MODEL=IlyaGusev/saiga_mistral_7b_lora
+VECTOR_SIZE=312
+BATCH_SIZE=32
+TEMPERATURE=0.1
+TOP_P=0.95
+REPETITION_PENALTY=1.15
+MAX_NEW_TOKENS=100
+TOP_K=5
 EOL
 fi
 
-# Запуск синхронизации с MongoDB в фоновом режиме
-echo "Запуск синхронизации с MongoDB..."
+
+
+# Запуск синхронизации с MongoDB в фоновом режиме (если MongoDB доступна)
+echo "Попытка запуска синхронизации с MongoDB..."
 python /workspace/mongodb_sync.py > /workspace/logs/mongodb_sync.log 2>&1 &
 SYNC_PID=$!
 echo "Процесс синхронизации запущен с PID: $SYNC_PID"
@@ -69,20 +102,6 @@ echo "Все сервисы запущены. Для мониторинга ис
 
 # Бесконечный цикл для поддержания контейнера активным
 while true; do
-
-        # Добавить проверку наличия curl
-    if ! command -v curl &> /dev/null; then
-        echo "curl не установлен, устанавливаем..."
-        apt-get update && apt-get install -y curl
-    fi
-
-    # Добавить проверку MongoDB
-    echo "Проверка доступности MongoDB..."
-    if ! mongosh --eval "db.adminCommand('ping')" > /dev/null; then
-        echo "MongoDB не доступна. Запускаем..."
-        mongod --fork --logpath /workspace/logs/mongodb.log
-    fi
-
     # Проверка, что процессы все еще работают
     if ! ps -p $SYNC_PID > /dev/null; then
         echo "Процесс синхронизации остановлен. Перезапуск..."
