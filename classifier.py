@@ -158,34 +158,35 @@ class KtruClassifier:
     def create_prompt(self, sku_data, similar_ktru_entries):
         """Создание промпта для классификации"""
         prompt = """Я предоставлю тебе JSON-файл с описанием товара и список похожих товаров из каталога КТРУ. 
-Твоя задача - определить единственный точный код КТРУ для этого товара.
-Если ты не можешь определить код с высокой уверенностью (более 95%), ответь только "код не найден".
+    Твоя задача - определить единственный точный код КТРУ для этого товара.
+    Если ты не можешь определить код с высокой уверенностью (более 95%), ответь только "код не найден".
 
-## Правила определения:
-1. Анализируй все поля JSON, особое внимание обрати на:
-   - title (полное наименование товара)
-   - description (описание товара)
-   - attributes (ключевые характеристики)
-   - brand (производитель)
-2. Для корректного определения кода КТРУ обязательно учитывай:
-   - Точное соответствие типа товара
-   - Технические характеристики
-   - Специфические особенности товара, указанные в описании
-3. Код КТРУ должен иметь формат XX.XX.XX.XXX-XXXXXXXX
+    ## Правила определения:
+    1. Анализируй все поля JSON, особое внимание обрати на:
+       - title (полное наименование товара)
+       - description (описание товара)
+       - attributes (ключевые характеристики)
+       - brand (производитель)
+    2. Для корректного определения кода КТРУ обязательно учитывай:
+       - Точное соответствие типа товара
+       - Технические характеристики
+       - Специфические особенности товара, указанные в описании
+    3. Код КТРУ должен иметь формат XX.XX.XX.XXX-XXXXXXXX
 
-## Похожие товары из каталога КТРУ:
-"""
+    ## Похожие товары из каталога КТРУ:
+    """
 
         # Добавляем похожие записи КТРУ в промпт
         for i, entry in enumerate(similar_ktru_entries, 1):
-            prompt += f"\n{i}. Код: {entry['payload']['ktru_code']}, Название: {entry['payload']['title']}\n"
+            payload = entry.payload  # ИСПРАВЛЕНО: получаем payload как атрибут
+            prompt += f"\n{i}. Код: {payload.get('ktru_code', '')}, Название: {payload.get('title', '')}\n"
 
-            if entry['payload'].get('description'):
-                prompt += f"   Описание: {entry['payload']['description']}\n"
+            if payload.get('description'):
+                prompt += f"   Описание: {payload.get('description')}\n"
 
-            if 'attributes' in entry['payload'] and entry['payload']['attributes']:
+            if 'attributes' in payload and payload.get('attributes'):
                 prompt += "   Атрибуты:\n"
-                for attr in entry['payload']['attributes']:
+                for attr in payload['attributes']:
                     prompt += f"   - {attr.get('attr_name', '')}: "
 
                     if 'attr_values' in attr:
@@ -318,9 +319,10 @@ class KtruClassifier:
                 confidence = best_match.score
 
                 # Устанавливаем порог схожести
-                if confidence > 0.8:  # Высокая схожесть
+                if confidence > 0.75:  # Высокая схожесть (ПОНИЖЕН С 0.8)
                     logger.info(f"Найдено совпадение по схожести: {confidence:.3f}")
-                    return best_match.payload['ktru_code']
+                    return best_match.payload.get('ktru_code',
+                                                  'код не найден')
                 else:
                     logger.info(f"Схожесть слишком низкая: {confidence:.3f}")
                     return "код не найден"
