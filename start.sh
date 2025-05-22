@@ -39,6 +39,47 @@ if ! python -c "import fastapi" 2>/dev/null; then
     pip install -r requirements.txt
 fi
 
+# Функция для проверки JSON файла КТРУ
+check_ktru_json() {
+    local json_path="${KTRU_JSON_PATH:-$PROJECT_DIR/data/ktru_data.json}"
+
+    if [ -f "$json_path" ]; then
+        local file_size=$(stat -f%z "$json_path" 2>/dev/null || stat -c%s "$json_path" 2>/dev/null || echo "0")
+        local file_size_mb=$((file_size / 1024 / 1024))
+
+        echo "📄 JSON файл КТРУ найден:"
+        echo "   - Путь: $json_path"
+        echo "   - Размер: ${file_size_mb} МБ"
+
+        if [ "$file_size" -gt 100 ]; then
+            echo "   ✅ JSON файл готов для использования"
+            return 0
+        else
+            echo "   ⚠️  JSON файл слишком мал (возможно поврежден)"
+            return 1
+        fi
+    else
+        echo "📄 JSON файл КТРУ не найден: $json_path"
+        echo "   ℹ️  Поместите файл с данными КТРУ в указанный путь для работы в автономном режиме"
+        return 1
+    fi
+}
+
+# Функция для загрузки примера JSON (если нужно)
+download_sample_json() {
+    local json_path="${KTRU_JSON_PATH:-$PROJECT_DIR/data/ktru_data.json}"
+
+    echo "📥 Хотите скачать образец JSON файла КТРУ? (y/N)"
+    read -t 10 -r response || response="n"
+
+    if [[ "$response" =~ ^[Yy]$ ]]; then
+        echo "📥 Загрузка образца JSON..."
+        # Здесь можно добавить URL для загрузки образца
+        # curl -L "https://example.com/ktru_sample.json" -o "$json_path"
+        echo "⚠️  URL для загрузки образца не настроен. Создайте файл вручную."
+    fi
+}
+
 # Функция для проверки состояния Qdrant
 check_qdrant_status() {
     local max_attempts=30
@@ -194,10 +235,12 @@ if [ ! -f "./.env" ]; then
 QDRANT_HOST=localhost
 QDRANT_PORT=6333
 QDRANT_COLLECTION=ktru_codes
-MONGO_EXTERNAL_URI=${MONGO_EXTERNAL_URI:-mongodb://external_mongodb_server:27017/}
+MONGO_EXTERNAL_URI=${MONGO_EXTERNAL_URI:-mongodb://mongodb.angora-ide.ts.net:27017/parser?directConnection=true}
 MONGO_LOCAL_URI=mongodb://localhost:27017/
-MONGO_DB_NAME=${MONGO_DB_NAME:-ktru_database}
-MONGO_COLLECTION=${MONGO_COLLECTION:-ktru_collection}
+MONGO_DB_NAME=${MONGO_DB_NAME:-parser}
+MONGO_COLLECTION=${MONGO_COLLECTION:-ktru}
+KTRU_JSON_PATH=${KTRU_JSON_PATH:-$PROJECT_DIR/data/ktru_data.json}
+ENABLE_JSON_FALLBACK=true
 API_HOST=0.0.0.0
 API_PORT=8000
 EMBEDDING_MODEL=cointegrated/rubert-tiny2
@@ -213,8 +256,18 @@ TOP_K=5
 EOL
 fi
 
+# Проверяем JSON файл КТРУ
+echo "📄 Проверка данных КТРУ..."
+if ! check_ktru_json; then
+    echo "⚠️  JSON файл с данными КТРУ не найден или поврежден"
+    echo "🔄 Система будет работать в режиме синхронизации с внешней MongoDB"
+    download_sample_json
+else
+    echo "✅ JSON файл КТРУ готов к использованию"
+fi
+
 # Запуск синхронизации с MongoDB в фоновом режиме
-echo "🔄 Попытка запуска синхронизации с MongoDB..."
+echo "🔄 Запуск синхронизации данных КТРУ..."
 nohup python ./mongodb_sync.py > ./logs/mongodb_sync.log 2>&1 &
 SYNC_PID=$!
 echo "✅ Процесс синхронизации запущен с PID: $SYNC_PID"
@@ -250,6 +303,10 @@ echo "   🔍 Qdrant:        http://localhost:6333"
 echo ""
 echo "📁 Логи в директории: $PROJECT_DIR/logs/"
 echo "🔧 Для проверки системы: cd $PROJECT_DIR && python system_status.py"
+echo ""
+echo "💡 Возможности загрузки данных:"
+echo "   📡 Автоматическая синхронизация с внешней MongoDB"
+echo "   📄 Fallback на локальный JSON файл (${KTRU_JSON_PATH:-$PROJECT_DIR/data/ktru_data.json})"
 echo ""
 echo "Для завершения нажмите Ctrl+C"
 

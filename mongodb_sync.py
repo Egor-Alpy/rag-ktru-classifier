@@ -1,11 +1,15 @@
 import time
+import json
+import os
 from datetime import datetime
 import logging
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
 from process_ktru_data import process_ktru_data
+from process_ktru_json import process_ktru_json
 from config import (
-    MONGO_EXTERNAL_URI, MONGO_LOCAL_URI, MONGO_DB_NAME, MONGO_COLLECTION
+    MONGO_EXTERNAL_URI, MONGO_LOCAL_URI, MONGO_DB_NAME, MONGO_COLLECTION,
+    KTRU_JSON_PATH, ENABLE_JSON_FALLBACK
 )
 
 # Настройка логирования
@@ -35,17 +39,81 @@ def connect_to_mongodb(uri, db_name=None):
         return None, None
 
 
+def load_ktru_from_json():
+    """Загрузка данных КТРУ из JSON файла как fallback"""
+    try:
+        if not os.path.exists(KTRU_JSON_PATH):
+            logger.error(f"JSON файл не найден: {KTRU_JSON_PATH}")
+            return False
+
+        logger.info(f"Загрузка данных КТРУ из JSON файла: {KTRU_JSON_PATH}")
+
+        # Используем функцию из process_ktru_json.py
+        process_ktru_json(KTRU_JSON_PATH)
+
+        logger.info("Данные КТРУ успешно загружены из JSON файла")
+        return True
+
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке данных из JSON: {e}")
+        return False
+
+
+def check_json_file_status():
+    """Проверка состояния JSON файла"""
+    if not os.path.exists(KTRU_JSON_PATH):
+        logger.warning(f"JSON файл не найден: {KTRU_JSON_PATH}")
+        return False
+
+    try:
+        file_stat = os.stat(KTRU_JSON_PATH)
+        file_size = file_stat.st_size
+        file_modified = datetime.fromtimestamp(file_stat.st_mtime)
+
+        logger.info(f"JSON файл найден:")
+        logger.info(f"  - Путь: {KTRU_JSON_PATH}")
+        logger.info(f"  - Размер: {file_size / (1024 * 1024):.2f} МБ")
+        logger.info(f"  - Последнее изменение: {file_modified}")
+
+        # Проверяем что файл не пустой
+        if file_size < 100:
+            logger.warning("JSON файл слишком мал, возможно поврежден")
+            return False
+
+        return True
+
+    except Exception as e:
+        logger.error(f"Ошибка при проверке JSON файла: {e}")
+        return False
+
+
 def sync_ktru_data():
-    """Синхронизация данных КТРУ с внешнего сервера"""
+    """Синхронизация данных КТРУ с внешнего сервера или из JSON"""
     try:
         logger.info("Запуск синхронизации данных КТРУ")
 
-        # Подключение к внешней MongoDB
+        # Сначала пытаемся подключиться к внешней MongoDB
         external_client, external_db = connect_to_mongodb(MONGO_EXTERNAL_URI, MONGO_DB_NAME)
-        if not external_client or not external_db:
-            logger.error("Не удалось подключиться к внешней MongoDB")
-            return False
 
+        if not external_client or not external_db:
+            logger.warning("Не удалось подключиться к внешней MongoDB")
+
+            # Проверяем, включен ли JSON fallback
+            if not ENABLE_JSON_FALLBACK:
+                logger.error("JSON fallback отключен в конфигурации")
+                return False
+
+            logger.info("Переключение на загрузку данных из JSON файла")
+
+            # Проверяем наличие и состояние JSON файла
+            if not check_json_file_status():
+                logger.error("JSON файл недоступен или поврежден")
+                return False
+
+            # Загружаем данные из JSON
+            return load_ktru_from_json()
+
+        # Если удалось подключиться к внешней MongoDB, продолжаем обычную синхронизацию
         external_ktru = external_db[MONGO_COLLECTION]
 
         # Подключение к локальной MongoDB
@@ -53,6 +121,12 @@ def sync_ktru_data():
         if not local_client or not local_db:
             logger.error("Не удалось подключиться к локальной MongoDB")
             external_client.close()
+
+            # Если локальная MongoDB недоступна, но есть JSON, используем его
+            if ENABLE_JSON_FALLBACK and check_json_file_status():
+                logger.info("Локальная MongoDB недоступна, используем JSON fallback")
+                return load_ktru_from_json()
+
             return False
 
         local_ktru = local_db[MONGO_COLLECTION]
@@ -118,12 +192,26 @@ def sync_ktru_data():
 
     except Exception as e:
         logger.error(f"Ошибка при синхронизации данных КТРУ: {e}")
+
+        # При любой ошибке пытаемся использовать JSON fallback
+        if ENABLE_JSON_FALLBACK and check_json_file_status():
+            logger.info("Ошибка синхронизации, пытаемся использовать JSON fallback")
+            return load_ktru_from_json()
+
         return False
 
 
 def run_sync_loop(interval=3600):
     """Запуск цикла синхронизации с заданным интервалом"""
     logger.info(f"Запуск цикла синхронизации данных КТРУ с интервалом {interval} секунд")
+    logger.info(f"JSON fallback {'включен' if ENABLE_JSON_FALLBACK else 'отключен'}")
+
+    if ENABLE_JSON_FALLBACK:
+        logger.info(f"Путь к JSON файлу: {KTRU_JSON_PATH}")
+
+    # Проверяем наличие JSON файла при запуске
+    if ENABLE_JSON_FALLBACK:
+        check_json_file_status()
 
     while True:
         try:

@@ -46,6 +46,10 @@ MONGO_EXT_PASS = os.getenv("MONGO_EXT_PASS", "")
 MONGO_EXT_AUTHMEC = os.getenv("MONGO_EXT_AUTHMEC", "")
 MONGO_EXT_AUTHSOURCE = os.getenv("MONGO_EXT_AUTHSOURCE", "")
 
+# Настройки JSON fallback
+KTRU_JSON_PATH = os.getenv("KTRU_JSON_PATH", os.path.join(DATA_DIR, "ktru_data.json"))
+ENABLE_JSON_FALLBACK = os.getenv("ENABLE_JSON_FALLBACK", "true").lower() == "true"
+
 # Настройки моделей
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "cointegrated/rubert-tiny2")
 LLM_BASE_MODEL = os.getenv("LLM_BASE_MODEL", "Open-Orca/Mistral-7B-OpenOrca")
