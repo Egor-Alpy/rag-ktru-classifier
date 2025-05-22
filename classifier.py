@@ -259,7 +259,9 @@ class KtruClassifier:
                 top_p=TOP_P,
                 repetition_penalty=REPETITION_PENALTY,
                 max_new_tokens=MAX_NEW_TOKENS,
-                do_sample=True
+                do_sample=True,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id
             )
 
             # Генерация ответа
