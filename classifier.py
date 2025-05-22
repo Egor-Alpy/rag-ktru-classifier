@@ -53,12 +53,18 @@ class KtruClassifier:
             logger.info(f"Загрузка адаптера модели: {LLM_ADAPTER_MODEL}")
 
             # Определяем тип данных в зависимости от поддержки
-            if torch.cuda.is_available() and torch.cuda.is_bf16_supported():
-                torch_dtype = torch.bfloat16
-                logger.info("Используется bfloat16")
-            elif torch.cuda.is_available():
-                torch_dtype = torch.float16
-                logger.info("Используется float16 (bfloat16 не поддерживается)")
+            device_available = torch.cuda.is_available()
+
+            if device_available:
+                # Проверяем поддержку bfloat16 только если CUDA доступна
+                try:
+                    # Создаем тестовый тензор для проверки поддержки bfloat16
+                    test_tensor = torch.tensor([1.0], dtype=torch.bfloat16, device='cuda')
+                    torch_dtype = torch.bfloat16
+                    logger.info("Используется bfloat16")
+                except (RuntimeError, AssertionError):
+                    torch_dtype = torch.float16
+                    logger.info("Используется float16 (bfloat16 не поддерживается)")
             else:
                 torch_dtype = torch.float32
                 logger.info("Используется float32 (CPU режим)")

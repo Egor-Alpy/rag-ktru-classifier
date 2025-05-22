@@ -32,7 +32,6 @@ class EmbeddingModel:
         """Генерирует эмбеддинг для текста"""
         if not text or text.strip() == "":
             logger.warning("Получен пустой текст для эмбеддинга")
-            # Возвращаем нулевой вектор правильной размерности
             return np.zeros(312)
 
         try:
@@ -57,14 +56,25 @@ class EmbeddingModel:
             if embedding.ndim > 1 and embedding.shape[0] == 1:
                 embedding = embedding[0]
 
-            # Проверяем размерность и обрезаем/дополняем до 312 если нужно
-            if len(embedding) != 312:
-                if len(embedding) > 312:
-                    embedding = embedding[:312]
+            # Логируем исходную размерность для отладки
+            original_size = len(embedding)
+
+            # Обрабатываем размерность более аккуратно
+            target_size = 312
+            if len(embedding) != target_size:
+                if len(embedding) > target_size:
+                    # Используем среднее pooling вместо обрезания
+                    step = len(embedding) // target_size
+                    if step > 1:
+                        embedding = embedding[::step][:target_size]
+                    else:
+                        embedding = embedding[:target_size]
+                    logger.debug(f"Уменьшена размерность с {original_size} до {len(embedding)}")
                 else:
-                    # Дополняем нулями до 312
-                    padding = np.zeros(312 - len(embedding))
+                    # Дополняем нулями до нужной размерности
+                    padding = np.zeros(target_size - len(embedding))
                     embedding = np.concatenate([embedding, padding])
+                    logger.debug(f"Увеличена размерность с {original_size} до {len(embedding)}")
 
             # Нормализуем вектор
             norm = np.linalg.norm(embedding)
@@ -75,26 +85,7 @@ class EmbeddingModel:
 
         except Exception as e:
             logger.error(f"Ошибка при создании эмбеддинга: {e}")
-            # В случае ошибки возвращаем нулевой вектор
             return np.zeros(312)
-
-    def generate_batch_embeddings(self, texts, batch_size=32):
-        """Генерирует эмбеддинги для пакета текстов"""
-        embeddings = []
-
-        # Обрабатываем пакетами
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i:i + batch_size]
-            batch_embeddings = []
-
-            for text in batch_texts:
-                embedding = self.generate_embedding(text)
-                batch_embeddings.append(embedding)
-
-            embeddings.extend(batch_embeddings)
-            logger.info(f"Обработано {len(embeddings)}/{len(texts)} текстов")
-
-        return embeddings
 
 
 # Создаем глобальный экземпляр модели для многократного использования

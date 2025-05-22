@@ -1,7 +1,7 @@
 FROM runpod/pytorch:2.1.0-py3.10-cuda12.1.0
 
 # Установка системных зависимостей
-RUN apt-get install -y \
+RUN apt-get update && apt-get install -y \
     git \
     wget \
     curl \
@@ -25,15 +25,15 @@ RUN curl -L https://github.com/qdrant/qdrant/releases/download/v1.7.4/qdrant-x86
     && tar -xzf qdrant.tar.gz -C /workspace \
     && rm qdrant.tar.gz
 
-
 # Копирование скриптов и конфигурации
 COPY *.py /workspace/
+COPY config.yaml /workspace/
 COPY start.sh /workspace/
 COPY supervisord.conf /etc/supervisor/conf.d/
 RUN chmod +x /workspace/start.sh
 
 # Открытие портов
-EXPOSE 8000 6333 27017
+EXPOSE 8000 6333
 
 # Запуск сервисов через Supervisor
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
