@@ -26,6 +26,13 @@ MONGO_LOCAL_URI = os.getenv("MONGO_LOCAL_URI", "mongodb://localhost:27017/")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "TenderDB")
 MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "ktru")
 
+MONGO_EXT_HOST = os.getenv("MONGO_EXT_HOST", "")
+MONGO_EXT_PORT = os.getenv("MONGO_EXT_PORT", "")
+MONGO_EXT_USERNAME = os.getenv("MONGO_EXT_USERNAME", "")
+MONGO_EXT_PASS = os.getenv("MONGO_EXT_PASS", "")
+MONGO_EXT_AUTHMEC = os.getenv("MONGO_EXT_AUTHMEC", "")
+MONGO_EXT_AUTHSOURCE = os.getenv("MONGO_EXT_AUTHSOURCE", "")
+
 # Настройки моделей
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "cointegrated/rubert-tiny2")
 LLM_BASE_MODEL = os.getenv("LLM_BASE_MODEL", "Open-Orca/Mistral-7B-OpenOrca")
