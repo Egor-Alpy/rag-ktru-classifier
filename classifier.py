@@ -101,9 +101,18 @@ class KtruClassifier:
             else:
                 LLM_BASE_MODEL_ACTUAL = LLM_BASE_MODEL
 
-            # Настройка токенизера
+            # Настройка токенизера для генерации
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
+
+            # Исправляем проблему с токенами для генерации
+            if tokenizer.pad_token_id is None:
+                tokenizer.pad_token_id = tokenizer.eos_token_id
+
+            # Убеждаемся что токены настроены корректно
+            if hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id is not None:
+                if tokenizer.pad_token_id != tokenizer.eos_token_id:
+                    tokenizer.pad_token_id = tokenizer.eos_token_id
 
             logger.info(f"Загрузка адаптера модели: {LLM_ADAPTER_MODEL}")
 
