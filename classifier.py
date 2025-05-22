@@ -18,6 +18,13 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 
+if not torch.cuda.is_available():
+    logger.warning("CUDA недоступна, используется CPU")
+
+if not torch.cuda.is_bf16_supported():
+    logger.warning("bfloat16 не поддерживается, используется float16")
+
+
 class KtruClassifier:
     def __init__(self):
         """Инициализация классификатора КТРУ"""
