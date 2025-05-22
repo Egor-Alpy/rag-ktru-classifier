@@ -11,7 +11,7 @@ QDRANT_RUNNING=$(curl -s http://localhost:6333/collections > /dev/null && echo "
 if [ "$QDRANT_RUNNING" = "no" ]; then
     echo "Запуск Qdrant..."
     cd /workspace
-    ./qdrant --storage-path /workspace/qdrant_storage > /workspace/logs/qdrant.log 2>&1 &
+    ./qdrant --config-path ./config/config.yaml > ./logs/qdrant.log 2>&1 &
 
     # Проверка запуска Qdrant
     echo "Ожидание запуска Qdrant..."

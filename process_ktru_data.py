@@ -96,7 +96,6 @@ def process_ktru_data():
     # Подключение к MongoDB
     mongo_client, ktru_collection = connect_to_mongodb(
         MONGO_EXTERNAL_URI, MONGO_DB_NAME, MONGO_COLLECTION)
-
     if not mongo_client or not ktru_collection:
         logger.error("Не удалось подключиться к MongoDB. Завершение процесса.")
         return

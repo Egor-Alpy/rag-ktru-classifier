@@ -23,8 +23,8 @@ QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "ktru_codes")
 # Настройки MongoDB
 MONGO_EXTERNAL_URI = os.getenv("MONGO_EXTERNAL_URI", "mongodb://external_mongodb_server:27017/")
 MONGO_LOCAL_URI = os.getenv("MONGO_LOCAL_URI", "mongodb://localhost:27017/")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "ktru_database")
-MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "ktru_collection")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "TenderDB")
+MONGO_COLLECTION = os.getenv("MONGO_COLLECTION", "ktru")
 
 # Настройки моделей
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "cointegrated/rubert-tiny2")
