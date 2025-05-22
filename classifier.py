@@ -3,7 +3,7 @@ import torch
 import json
 import logging
 from peft import AutoPeftModelForCausalLM
-from transformers import AutoTokenizer, GenerationConfig
+from transformers import AutoTokenizer, GenerationConfig, LlamaTokenizer
 from qdrant_client import QdrantClient
 from embedding import generate_embedding
 from config import (
@@ -40,8 +40,70 @@ class KtruClassifier:
         """Настройка языковой модели"""
         try:
             logger.info(f"Загрузка базовой модели: {LLM_BASE_MODEL}")
-            tokenizer = AutoTokenizer.from_pretrained(LLM_BASE_MODEL, trust_remote_code=True)
-            tokenizer.pad_token = tokenizer.eos_token
+
+            # Попробуем разные способы загрузки токенизера
+            tokenizer = None
+            model = None
+
+            # Способ 1: Стандартная загрузка
+            try:
+                logger.info("Попытка 1: Стандартная загрузка токенизера")
+                tokenizer = AutoTokenizer.from_pretrained(
+                    LLM_BASE_MODEL,
+                    trust_remote_code=True,
+                    use_fast=False  # Принудительно используем медленный токенизер
+                )
+                logger.info("✅ Токенизер загружен (стандартный способ)")
+            except Exception as e:
+                logger.warning(f"Способ 1 не сработал: {e}")
+
+            # Способ 2: Загрузка как LlamaTokenizer
+            if tokenizer is None:
+                try:
+                    logger.info("Попытка 2: Загрузка как LlamaTokenizer")
+                    tokenizer = LlamaTokenizer.from_pretrained(
+                        LLM_BASE_MODEL,
+                        trust_remote_code=True
+                    )
+                    logger.info("✅ Токенизер загружен (LlamaTokenizer)")
+                except Exception as e:
+                    logger.warning(f"Способ 2 не сработал: {e}")
+
+            # Способ 3: Загрузка с дополнительными параметрами
+            if tokenizer is None:
+                try:
+                    logger.info("Попытка 3: Загрузка с дополнительными параметрами")
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        LLM_BASE_MODEL,
+                        trust_remote_code=True,
+                        use_fast=False,
+                        legacy=True,
+                        padding_side="left"
+                    )
+                    logger.info("✅ Токенизер загружен (расширенные параметры)")
+                except Exception as e:
+                    logger.warning(f"Способ 3 не сработал: {e}")
+
+            # Способ 4: Попробуем другую модель
+            if tokenizer is None:
+                logger.info("Попытка 4: Альтернативная модель")
+                alternative_model = "microsoft/DialoGPT-medium"
+                try:
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        alternative_model,
+                        trust_remote_code=True
+                    )
+                    LLM_BASE_MODEL_ACTUAL = alternative_model
+                    logger.info(f"✅ Токенизер загружен (альтернативная модель: {alternative_model})")
+                except Exception as e:
+                    logger.error(f"Все способы загрузки токенизера не сработали: {e}")
+                    return None, None
+            else:
+                LLM_BASE_MODEL_ACTUAL = LLM_BASE_MODEL
+
+            # Настройка токенизера
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
 
             logger.info(f"Загрузка адаптера модели: {LLM_ADAPTER_MODEL}")
 
@@ -63,15 +125,34 @@ class KtruClassifier:
                 torch_dtype = torch.float32
                 logger.info("Используется float32 (CPU режим)")
 
-            model = AutoPeftModelForCausalLM.from_pretrained(
-                LLM_ADAPTER_MODEL,
-                device_map="auto",
-                torch_dtype=torch_dtype
-            )
+            # Загрузка модели с обработкой ошибок
+            try:
+                model = AutoPeftModelForCausalLM.from_pretrained(
+                    LLM_ADAPTER_MODEL,
+                    device_map="auto",
+                    torch_dtype=torch_dtype
+                )
+                logger.info("✅ PEFT модель загружена успешно")
+            except Exception as e:
+                logger.warning(f"Ошибка загрузки PEFT модели: {e}")
+                logger.info("Попытка загрузки базовой модели без адаптера...")
+
+                try:
+                    from transformers import AutoModelForCausalLM
+                    model = AutoModelForCausalLM.from_pretrained(
+                        LLM_BASE_MODEL_ACTUAL,
+                        device_map="auto",
+                        torch_dtype=torch_dtype
+                    )
+                    logger.info("✅ Базовая модель загружена успешно")
+                except Exception as e2:
+                    logger.error(f"Ошибка загрузки базовой модели: {e2}")
+                    return None, None
 
             return model, tokenizer
+
         except Exception as e:
-            logger.error(f"Ошибка при настройке языковой модели: {e}")
+            logger.error(f"Критическая ошибка при настройке языковой модели: {e}")
             return None, None
 
     def create_prompt(self, sku_data, similar_ktru_entries):
@@ -120,9 +201,14 @@ class KtruClassifier:
 
     def classify_sku(self, sku_data, top_k=TOP_K):
         """Классификация SKU по КТРУ коду"""
-        if not self.qdrant_client or not self.llm or not self.tokenizer:
-            logger.error("Не инициализированы компоненты классификатора")
+        if not self.qdrant_client:
+            logger.error("Qdrant клиент не инициализирован")
             return "код не найден"
+
+        if not self.llm or not self.tokenizer:
+            logger.error("LLM модель не инициализирована")
+            # Можем попробовать классификацию только по эмбеддингам
+            return self._classify_by_similarity_only(sku_data, top_k)
 
         try:
             # Подготовка текста для эмбеддинга
@@ -200,6 +286,49 @@ class KtruClassifier:
 
         except Exception as e:
             logger.error(f"Ошибка при классификации SKU: {e}")
+            return "код не найден"
+
+    def _classify_by_similarity_only(self, sku_data, top_k=TOP_K):
+        """Fallback классификация только по схожести эмбеддингов"""
+        try:
+            logger.info("Использование fallback классификации по схожести")
+
+            # Подготовка текста для эмбеддинга
+            sku_text = f"{sku_data['title']} {sku_data.get('description', '')}"
+
+            # Добавляем атрибуты
+            if 'attributes' in sku_data and sku_data['attributes']:
+                for attr in sku_data['attributes']:
+                    attr_name = attr.get('attr_name', '')
+                    attr_value = attr.get('attr_value', '')
+                    sku_text += f" {attr_name}: {attr_value}"
+
+            # Генерируем эмбеддинг
+            sku_embedding = generate_embedding(sku_text)
+
+            # Поиск похожих КТРУ кодов
+            search_result = self.qdrant_client.search(
+                collection_name=QDRANT_COLLECTION,
+                query_vector=sku_embedding.tolist(),
+                limit=1  # Берем только самый похожий
+            )
+
+            if search_result and len(search_result) > 0:
+                best_match = search_result[0]
+                confidence = best_match.score
+
+                # Устанавливаем порог схожести
+                if confidence > 0.8:  # Высокая схожесть
+                    logger.info(f"Найдено совпадение по схожести: {confidence:.3f}")
+                    return best_match.payload['ktru_code']
+                else:
+                    logger.info(f"Схожесть слишком низкая: {confidence:.3f}")
+                    return "код не найден"
+            else:
+                return "код не найден"
+
+        except Exception as e:
+            logger.error(f"Ошибка в fallback классификации: {e}")
             return "код не найден"
 
 
