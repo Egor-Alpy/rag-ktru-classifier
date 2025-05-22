@@ -3,7 +3,7 @@
 # Создание необходимых директорий
 mkdir -p /workspace/logs
 
-echo "Запуск сервисов классификации КТРУ..."
+echo "🚀 Запуск сервисов классификации КТРУ..."
 
 # Добавить проверку наличия curl
 if ! command -v curl &> /dev/null; then
@@ -11,16 +11,132 @@ if ! command -v curl &> /dev/null; then
     apt-get update && apt-get install -y curl
 fi
 
+# Функция для проверки состояния Qdrant
+check_qdrant_status() {
+    local max_attempts=30
+    local attempt=1
+
+    echo "⏳ Ожидание запуска Qdrant..."
+
+    while [ $attempt -le $max_attempts ]; do
+        if curl -s http://localhost:6333/collections > /dev/null 2>&1; then
+            echo "✅ Qdrant успешно запущен!"
+
+            # Получаем информацию о коллекциях
+            collections_info=$(curl -s http://localhost:6333/collections 2>/dev/null || echo "")
+            if [ ! -z "$collections_info" ]; then
+                echo "📊 Проверка состояния векторной БД..."
+                python3 -c "
+import requests
+import json
+
+try:
+    response = requests.get('http://localhost:6333/collections')
+    if response.status_code == 200:
+        data = response.json()
+        collections = data.get('result', {}).get('collections', [])
+
+        if collections:
+            print(f'📚 Найдено коллекций: {len(collections)}')
+
+            for collection in collections:
+                name = collection.get('name', 'unknown')
+                try:
+                    # Получаем статистику коллекции
+                    count_response = requests.get(f'http://localhost:6333/collections/{name}/points/count')
+                    if count_response.status_code == 200:
+                        count_data = count_response.json()
+                        count = count_data.get('result', {}).get('count', 0)
+                        print(f'   - {name}: {count:,} записей')
+                    else:
+                        print(f'   - {name}: статистика недоступна')
+                except:
+                    print(f'   - {name}: ошибка получения статистики')
+        else:
+            print('📭 Коллекции не найдены')
+    else:
+        print('❌ Ошибка получения списка коллекций')
+except Exception as e:
+    print(f'❌ Ошибка при проверке коллекций: {e}')
+" 2>/dev/null || echo "⚠️  Не удалось получить детальную информацию о коллекциях"
+            fi
+            return 0
+        fi
+
+        echo "Попытка $attempt/$max_attempts..."
+        sleep 2
+        ((attempt++))
+    done
+
+    echo "❌ Ошибка: Qdrant не запустился в течение 60 секунд."
+    return 1
+}
+
+# Функция для проверки API
+check_api_status() {
+    local max_attempts=10
+    local attempt=1
+
+    echo "⏳ Проверка API..."
+
+    while [ $attempt -le $max_attempts ]; do
+        if curl -s http://localhost:8000/health > /dev/null 2>&1; then
+            echo "✅ API успешно запущен!"
+
+            # Получаем статус системы
+            echo "📊 Проверка состояния системы..."
+            python3 -c "
+import requests
+import json
+
+try:
+    response = requests.get('http://localhost:8000/status', timeout=10)
+    if response.status_code == 200:
+        data = response.json()
+
+        print(f'🔧 Статус компонентов:')
+        print(f'   - API: {data.get(\"api\", \"unknown\")}')
+        print(f'   - Qdrant: {data.get(\"qdrant\", \"unknown\")}')
+        print(f'   - Модели: {data.get(\"models\", \"unknown\")}')
+        print(f'   - КТРУ загружено: {data.get(\"ktru_loaded\", False)}')
+
+        collections = data.get('collections', {})
+        if collections:
+            print(f'📚 Коллекции:')
+            for name, info in collections.items():
+                count = info.get('vectors_count', 0)
+                size = info.get('vector_size', 0)
+                print(f'   - {name}: {count:,} векторов (размерность {size})')
+        else:
+            print('📭 Коллекции не найдены в статусе')
+    else:
+        print(f'⚠️  Статус API недоступен: {response.status_code}')
+except Exception as e:
+    print(f'⚠️  Ошибка при получении статуса: {e}')
+" 2>/dev/null || echo "⚠️  Не удалось получить детальную информацию о статусе"
+
+            return 0
+        fi
+
+        echo "Попытка $attempt/$max_attempts..."
+        sleep 3
+        ((attempt++))
+    done
+
+    echo "❌ API не отвечает"
+    return 1
+}
+
 # Проверка доступности Qdrant
 QDRANT_RUNNING=$(curl -s http://localhost:6333/collections > /dev/null && echo "yes" || echo "no")
 
 if [ "$QDRANT_RUNNING" = "no" ]; then
-    echo "Запуск Qdrant..."
+    echo "🔄 Запуск Qdrant..."
     cd /workspace
 
     # Проверяем наличие config.yaml, если нет - создаем базовый
     if [ ! -f "/workspace/config.yaml" ]; then
-        echo "Создание базовой конфигурации Qdrant..."
+        echo "📝 Создание базовой конфигурации Qdrant..."
         cat > /workspace/config.yaml << EOL
 storage:
   storage_path: /workspace/qdrant_storage
@@ -33,31 +149,23 @@ EOL
     fi
 
     ./qdrant --config-path /workspace/config.yaml > ./logs/qdrant.log 2>&1 &
+    QDRANT_PID=$!
 
-    # Проверка запуска Qdrant
-    echo "Ожидание запуска Qdrant..."
-    COUNTER=0
-    while [ $COUNTER -lt 30 ]; do
-        sleep 2
-        QDRANT_RUNNING=$(curl -s http://localhost:6333/collections > /dev/null && echo "yes" || echo "no")
-        if [ "$QDRANT_RUNNING" = "yes" ]; then
-            echo "Qdrant успешно запущен!"
-            break
-        fi
-        COUNTER=$((COUNTER+1))
-    done
-
-    if [ "$QDRANT_RUNNING" = "no" ]; then
-        echo "Ошибка: Qdrant не запустился в течение 60 секунд. Проверьте логи."
+    # Проверка запуска Qdrant с детальной информацией
+    if ! check_qdrant_status; then
+        echo "❌ Критическая ошибка: Qdrant не запустился"
+        echo "📋 Логи Qdrant:"
+        tail -20 /workspace/logs/qdrant.log
         exit 1
     fi
 else
-    echo "Qdrant уже запущен."
+    echo "✅ Qdrant уже запущен."
+    check_qdrant_status
 fi
 
 # Создаем .env файл, если нужно
 if [ ! -f "/workspace/.env" ]; then
-    echo "Создание .env файла..."
+    echo "📝 Создание .env файла..."
     cat > /workspace/.env << EOL
 QDRANT_HOST=localhost
 QDRANT_PORT=6333
@@ -82,35 +190,62 @@ EOL
 fi
 
 # Запуск синхронизации с MongoDB в фоновом режиме (если MongoDB доступна)
-echo "Попытка запуска синхронизации с MongoDB..."
+echo "🔄 Попытка запуска синхронизации с MongoDB..."
 python /workspace/mongodb_sync.py > /workspace/logs/mongodb_sync.log 2>&1 &
 SYNC_PID=$!
-echo "Процесс синхронизации запущен с PID: $SYNC_PID"
+echo "✅ Процесс синхронизации запущен с PID: $SYNC_PID"
 
 # Запуск API сервиса
-echo "Запуск API-сервиса..."
+echo "🔄 Запуск API-сервиса..."
 python /workspace/api.py > /workspace/logs/api.log 2>&1 &
 API_PID=$!
-echo "API-сервис запущен с PID: $API_PID"
+echo "✅ API-сервис запущен с PID: $API_PID"
+
+# Ждем запуска API и проверяем статус
+sleep 5
+
+if ! check_api_status; then
+    echo "❌ Критическая ошибка: API не запустился"
+    echo "📋 Логи API:"
+    tail -20 /workspace/logs/api.log
+    exit 1
+fi
 
 # Обработка сигналов завершения
-trap 'kill $SYNC_PID $API_PID; exit' SIGINT SIGTERM
+trap 'echo "🛑 Завершение работы..."; kill $SYNC_PID $API_PID 2>/dev/null; exit' SIGINT SIGTERM
 
-echo "Все сервисы запущены. Для мониторинга используйте логи в директории /workspace/logs/"
+echo ""
+echo "🎉 Все сервисы успешно запущены!"
+echo "=" * 50
+echo "📍 Endpoints:"
+echo "   🏥 Health check: http://localhost:8000/health"
+echo "   📊 System status: http://localhost:8000/status"
+echo "   📚 Collections:   http://localhost:8000/collections"
+echo "   🤖 Classify:      http://localhost:8000/classify"
+echo "   🔍 Qdrant:        http://localhost:6333"
+echo ""
+echo "📁 Логи в директории: /workspace/logs/"
+echo "🔧 Для проверки системы: python system_status.py"
+echo ""
+echo "Для завершения нажмите Ctrl+C"
 
 # Бесконечный цикл для поддержания контейнера активным
 while true; do
     # Проверка, что процессы все еще работают
-    if ! ps -p $SYNC_PID > /dev/null; then
-        echo "Процесс синхронизации остановлен. Перезапуск..."
+    if ! ps -p $SYNC_PID > /dev/null 2>&1; then
+        echo "$(date): ⚠️  Процесс синхронизации остановлен. Перезапуск..."
         python /workspace/mongodb_sync.py > /workspace/logs/mongodb_sync.log 2>&1 &
         SYNC_PID=$!
     fi
 
-    if ! ps -p $API_PID > /dev/null; then
-        echo "API-сервис остановлен. Перезапуск..."
+    if ! ps -p $API_PID > /dev/null 2>&1; then
+        echo "$(date): ⚠️  API-сервис остановлен. Перезапуск..."
         python /workspace/api.py > /workspace/logs/api.log 2>&1 &
         API_PID=$!
+
+        # Проверяем что API снова заработал
+        sleep 5
+        check_api_status
     fi
 
     sleep 60
