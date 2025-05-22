@@ -135,6 +135,106 @@ async def health_check():
     return {"status": "healthy", "version": "1.0.0"}
 
 
+@app.get("/status")
+async def system_status():
+    """Endpoint для проверки состояния всей системы"""
+    from qdrant_client import QdrantClient
+    from config import QDRANT_HOST, QDRANT_PORT, QDRANT_COLLECTION
+
+    status = {
+        "api": "healthy",
+        "qdrant": "unknown",
+        "collections": {},
+        "models": "unknown",
+        "timestamp": time.time()
+    }
+
+    try:
+        # Проверка Qdrant
+        qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+
+        # Получаем информацию о коллекциях
+        collections = qdrant_client.get_collections()
+        status["qdrant"] = "healthy"
+
+        for collection in collections.collections:
+            collection_info = qdrant_client.get_collection(collection.name)
+            collection_stats = qdrant_client.count(collection.name)
+
+            status["collections"][collection.name] = {
+                "vectors_count": collection_stats.count,
+                "vector_size": collection_info.config.params.vectors.size,
+                "distance": collection_info.config.params.vectors.distance.name,
+                "status": collection_info.status.name
+            }
+
+        # Проверяем, есть ли наша основная коллекция
+        if QDRANT_COLLECTION in status["collections"]:
+            status["ktru_loaded"] = status["collections"][QDRANT_COLLECTION]["vectors_count"] > 0
+        else:
+            status["ktru_loaded"] = False
+
+    except Exception as e:
+        status["qdrant"] = f"error: {str(e)}"
+        logger.error(f"Ошибка при проверке состояния Qdrant: {e}")
+
+    try:
+        # Проверяем модели
+        from embedding import embedding_model
+        if embedding_model and embedding_model.model:
+            status["models"] = "loaded"
+        else:
+            status["models"] = "not_loaded"
+    except Exception as e:
+        status["models"] = f"error: {str(e)}"
+
+    return status
+
+
+@app.get("/collections")
+async def get_collections_info():
+    """Подробная информация о коллекциях"""
+    from qdrant_client import QdrantClient
+    from config import QDRANT_HOST, QDRANT_PORT
+
+    try:
+        qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+        collections = qdrant_client.get_collections()
+
+        detailed_info = {}
+
+        for collection in collections.collections:
+            collection_info = qdrant_client.get_collection(collection.name)
+            collection_stats = qdrant_client.count(collection.name)
+
+            # Получаем примеры записей
+            try:
+                sample_points = qdrant_client.scroll(
+                    collection_name=collection.name,
+                    limit=3,
+                    with_payload=True,
+                    with_vectors=False
+                )
+                samples = [point.payload for point in sample_points[0]] if sample_points[0] else []
+            except:
+                samples = []
+
+            detailed_info[collection.name] = {
+                "vectors_count": collection_stats.count,
+                "vector_size": collection_info.config.params.vectors.size,
+                "distance": collection_info.config.params.vectors.distance.name,
+                "status": collection_info.status.name,
+                "optimizer_status": collection_info.optimizer_status,
+                "samples": samples
+            }
+
+        return {"collections": detailed_info, "total_collections": len(detailed_info)}
+
+    except Exception as e:
+        logger.error(f"Ошибка при получении информации о коллекциях: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка получения данных: {str(e)}")
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Глобальный обработчик исключений"""

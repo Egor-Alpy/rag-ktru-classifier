@@ -1,5 +1,5 @@
 # Основные ML зависимости
-torch>=2.0.0,<2.2.0
+torch==2.2.0
 transformers>=4.30.0,<4.40.0
 sentence-transformers>=2.2.2,<3.0.0
 peft>=0.4.0,<0.8.0
