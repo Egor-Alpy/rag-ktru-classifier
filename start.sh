@@ -2,21 +2,6 @@
 
 # Создание необходимых директорий
 mkdir -p /workspace/logs
-mkdir -p /workspace/config
-
-# Создаем конфигурационный файл Qdrant, если его нет
-if [ ! -f "/workspace/config.yaml" ]; then
-    echo "Создание конфигурации Qdrant..."
-    cat > /workspace/config.yaml << EOL
-storage:
-  storage_path: /workspace/qdrant_storage
-service:
-  host: 0.0.0.0
-  http_port: 6333
-  grpc_port: 6334
-log_level: INFO
-EOL
-fi
 
 echo "Запуск сервисов классификации КТРУ..."
 
@@ -32,6 +17,21 @@ QDRANT_RUNNING=$(curl -s http://localhost:6333/collections > /dev/null && echo "
 if [ "$QDRANT_RUNNING" = "no" ]; then
     echo "Запуск Qdrant..."
     cd /workspace
+
+    # Проверяем наличие config.yaml, если нет - создаем базовый
+    if [ ! -f "/workspace/config.yaml" ]; then
+        echo "Создание базовой конфигурации Qdrant..."
+        cat > /workspace/config.yaml << EOL
+storage:
+  storage_path: /workspace/qdrant_storage
+service:
+  host: 0.0.0.0
+  http_port: 6333
+  grpc_port: 6334
+log_level: INFO
+EOL
+    fi
+
     ./qdrant --config-path /workspace/config.yaml > ./logs/qdrant.log 2>&1 &
 
     # Проверка запуска Qdrant
@@ -80,8 +80,6 @@ MAX_NEW_TOKENS=100
 TOP_K=5
 EOL
 fi
-
-
 
 # Запуск синхронизации с MongoDB в фоновом режиме (если MongoDB доступна)
 echo "Попытка запуска синхронизации с MongoDB..."

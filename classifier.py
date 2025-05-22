@@ -18,13 +18,6 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 
-if not torch.cuda.is_available():
-    logger.warning("CUDA недоступна, используется CPU")
-
-if not torch.cuda.is_bf16_supported():
-    logger.warning("bfloat16 не поддерживается, используется float16")
-
-
 class KtruClassifier:
     def __init__(self):
         """Инициализация классификатора КТРУ"""
@@ -54,6 +47,7 @@ class KtruClassifier:
 
             # Определяем тип данных в зависимости от поддержки
             device_available = torch.cuda.is_available()
+            logger.info(f"CUDA доступна: {device_available}")
 
             if device_available:
                 # Проверяем поддержку bfloat16 только если CUDA доступна
@@ -62,7 +56,7 @@ class KtruClassifier:
                     test_tensor = torch.tensor([1.0], dtype=torch.bfloat16, device='cuda')
                     torch_dtype = torch.bfloat16
                     logger.info("Используется bfloat16")
-                except (RuntimeError, AssertionError):
+                except (RuntimeError, AssertionError, Exception):
                     torch_dtype = torch.float16
                     logger.info("Используется float16 (bfloat16 не поддерживается)")
             else:

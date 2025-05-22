@@ -87,6 +87,24 @@ class EmbeddingModel:
             logger.error(f"Ошибка при создании эмбеддинга: {e}")
             return np.zeros(312)
 
+    def generate_batch_embeddings(self, texts, batch_size=32):
+        """Генерирует эмбеддинги для пакета текстов"""
+        embeddings = []
+
+        # Обрабатываем пакетами
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i:i + batch_size]
+            batch_embeddings = []
+
+            for text in batch_texts:
+                embedding = self.generate_embedding(text)
+                batch_embeddings.append(embedding)
+
+            embeddings.extend(batch_embeddings)
+            logger.info(f"Обработано {len(embeddings)}/{len(texts)} текстов")
+
+        return embeddings
+
 
 # Создаем глобальный экземпляр модели для многократного использования
 embedding_model = EmbeddingModel()
