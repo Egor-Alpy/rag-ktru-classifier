@@ -1,8 +1,5 @@
-from typing import Dict, Any, Optional, List
-from langchain_openai import ChatOpenAI
+from typing import Dict, Any, Optional, List, Tuple
 from langchain_community.chat_models import ChatOllama
-from langchain_anthropic import ChatAnthropic
-from langchain.prompts import ChatPromptTemplate
 from langchain.schema import HumanMessage, SystemMessage
 from loguru import logger
 from config import settings
@@ -10,36 +7,21 @@ import json
 
 
 class LLMService:
-    """Service for LLM interactions"""
+    """Service for LLM interactions using only local models"""
 
     def __init__(self):
-        self.provider = settings.llm_provider
+        self.provider = "ollama"  # Только локальный провайдер
         self.model = self._initialize_llm()
-        logger.info(f"Initialized LLM: {self.provider} - {settings.llm_model}")
+        logger.info(f"Initialized local LLM: {settings.llm_model}")
 
     def _initialize_llm(self):
-        """Initialize LLM based on provider"""
-        if self.provider == "openai":
-            return ChatOpenAI(
-                model=settings.llm_model,
-                temperature=settings.llm_temperature,
-                max_tokens=settings.llm_max_tokens,
-                api_key=settings.openai_api_key
-            )
-        elif self.provider == "anthropic":
-            return ChatAnthropic(
-                model=settings.llm_model,
-                temperature=settings.llm_temperature,
-                max_tokens=settings.llm_max_tokens,
-                api_key=settings.anthropic_api_key
-            )
-        elif self.provider == "ollama":
-            return ChatOllama(
-                model=settings.llm_model,
-                temperature=settings.llm_temperature
-            )
-        else:
-            raise ValueError(f"Unknown LLM provider: {self.provider}")
+        """Initialize local LLM"""
+        return ChatOllama(
+            model=settings.llm_model,
+            base_url=settings.ollama_host,
+            temperature=settings.llm_temperature,
+            num_predict=settings.llm_max_tokens
+        )
 
     def classify_product(
             self,
@@ -125,10 +107,32 @@ class LLMService:
 
             # Parse JSON response
             try:
-                result = json.loads(response.content)
+                # Ollama может возвращать ответ в разных форматах
+                content = response.content if hasattr(response, 'content') else str(response)
+
+                # Попытка найти JSON в ответе
+                start_idx = content.find('{')
+                end_idx = content.rfind('}') + 1
+
+                if start_idx != -1 and end_idx > start_idx:
+                    json_str = content[start_idx:end_idx]
+                    result = json.loads(json_str)
+                else:
+                    # Если JSON не найден, пытаемся распарсить весь ответ
+                    result = json.loads(content)
+
+                # Проверяем наличие необходимых полей
+                if 'code' not in result:
+                    result['code'] = None
+                if 'confidence' not in result:
+                    result['confidence'] = 0
+                if 'reasoning' not in result:
+                    result['reasoning'] = "Нет обоснования"
+
                 return result
-            except json.JSONDecodeError:
-                logger.error(f"Failed to parse LLM response: {response.content}")
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse LLM response: {content[:200]}...")
                 return {
                     "code": None,
                     "confidence": 0,
@@ -159,8 +163,14 @@ class LLMService:
             HumanMessage(content=prompt.format(product_info=json.dumps(product_info, ensure_ascii=False)))
         ]
 
-        response = self.model.invoke(messages)
-        return response.content.strip()
+        try:
+            response = self.model.invoke(messages)
+            content = response.content if hasattr(response, 'content') else str(response)
+            return content.strip()
+        except Exception as e:
+            logger.error(f"Error generating search query: {e}")
+            # Возвращаем простой запрос на основе названия
+            return product_info.get('title', 'товар')
 
 
 # Global instance

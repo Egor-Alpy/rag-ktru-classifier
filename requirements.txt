@@ -8,17 +8,13 @@ python-multipart==0.0.6
 # LangChain ecosystem
 langchain==0.1.0
 langchain-community==0.1.0
-langchain-openai==0.0.5
 
 # Vector stores and embeddings
 qdrant-client==1.7.0
 sentence-transformers==2.2.2
-chromadb==0.4.22
 
-# LLM providers
-openai==1.6.0
+# Local LLM providers
 ollama==0.1.6
-anthropic==0.8.0
 
 # Data processing
 pandas==2.1.4
