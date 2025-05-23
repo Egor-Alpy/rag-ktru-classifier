@@ -1,10 +1,10 @@
 import os
 from dotenv import load_dotenv
 
-# Загрузка переменных окружения из .env файла, если он существует
+# Загрузка переменных окружения
 load_dotenv()
 
-# Определяем базовую директорию проекта
+# Базовые пути
 current_dir = os.getcwd()
 if current_dir.endswith('rag-ktru-classifier'):
     BASE_DIR = current_dir
@@ -15,13 +15,13 @@ else:
 
 print(f"Используется базовая директория: {BASE_DIR}")
 
-# Пути
+# Директории
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 DATA_DIR = os.path.join(BASE_DIR, "data")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
 QDRANT_STORAGE = os.path.join(BASE_DIR, "qdrant_storage")
 
-# Создание директорий, если они не существуют
+# Создание директорий
 for dir_path in [MODELS_DIR, DATA_DIR, LOGS_DIR, QDRANT_STORAGE]:
     os.makedirs(dir_path, exist_ok=True)
 
@@ -43,37 +43,102 @@ MONGO_EXT_PASS = os.getenv("MONGO_EXT_PASS", "")
 MONGO_EXT_AUTHMEC = os.getenv("MONGO_EXT_AUTHMEC", "")
 MONGO_EXT_AUTHSOURCE = os.getenv("MONGO_EXT_AUTHSOURCE", "")
 
-# Настройки JSON fallback
+# Настройки JSON
 KTRU_JSON_PATH = os.getenv("KTRU_JSON_PATH", os.path.join(DATA_DIR, "ktru_data.json"))
 ENABLE_JSON_FALLBACK = os.getenv("ENABLE_JSON_FALLBACK", "true").lower() == "true"
 
-# Настройки моделей - ОПТИМИЗИРОВАНО для максимальной точности
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "ai-forever/sbert_large_nlu_ru")  # Лучшая модель для русского языка
+# ОПТИМИЗИРОВАННЫЕ НАСТРОЙКИ МОДЕЛЕЙ ДЛЯ ТОЧНОСТИ
+
+# Модель эмбеддингов - используем лучшую для русского языка
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "ai-forever/sbert_large_nlu_ru")
+VECTOR_SIZE = int(os.getenv("VECTOR_SIZE", "1024"))  # Размерность для sbert_large_nlu_ru
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))  # Оптимальный размер батча
+
+# LLM модель для финальной классификации
 LLM_BASE_MODEL = os.getenv("LLM_BASE_MODEL", "Open-Orca/Mistral-7B-OpenOrca")
 LLM_ADAPTER_MODEL = os.getenv("LLM_ADAPTER_MODEL", "IlyaGusev/saiga_mistral_7b_lora")
-VECTOR_SIZE = int(os.getenv("VECTOR_SIZE", "1024"))  # Размерность для sbert_large_nlu_ru
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))     # Уменьшен для большей модели
 
 # Настройки API
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
 
-# Параметры генерации - МАКСИМАЛЬНАЯ ТОЧНОСТЬ
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0.1"))    # Очень низкая для детерминированности
-TOP_P = float(os.getenv("TOP_P", "0.9"))               # Строгий отбор токенов
+# ПАРАМЕТРЫ ГЕНЕРАЦИИ - ОПТИМИЗИРОВАНЫ ДЛЯ ТОЧНОСТИ
+TEMPERATURE = float(os.getenv("TEMPERATURE", "0.1"))  # Очень низкая для детерминированности
+TOP_P = float(os.getenv("TOP_P", "0.9"))  # Консервативный отбор токенов
 REPETITION_PENALTY = float(os.getenv("REPETITION_PENALTY", "1.15"))
-MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "50"))  # Достаточно для кода КТРУ
+MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "50"))  # Достаточно для КТРУ кода
 
-# Параметры поиска - УВЕЛИЧЕНЫ для точности
-TOP_K = int(os.getenv("TOP_K", "100"))  # Много кандидатов для тщательного анализа
+# ПАРАМЕТРЫ ПОИСКА - УВЕЛИЧЕНЫ ДЛЯ ЛУЧШЕГО ОТБОРА
+TOP_K = int(os.getenv("TOP_K", "50"))  # Больше кандидатов для анализа
 
-# Пороги точности - ПОВЫШЕНЫ для требования 95%+
-SIMILARITY_THRESHOLD_HIGH = float(os.getenv("SIMILARITY_THRESHOLD_HIGH", "0.95"))   # Очень высокая схожесть
-SIMILARITY_THRESHOLD_MEDIUM = float(os.getenv("SIMILARITY_THRESHOLD_MEDIUM", "0.90")) # Высокая схожесть
-SIMILARITY_THRESHOLD_LOW = float(os.getenv("SIMILARITY_THRESHOLD_LOW", "0.85"))     # Минимальный порог
+# НОВЫЕ ПАРАМЕТРЫ ДЛЯ УЛУЧШЕННОЙ КЛАССИФИКАЦИИ
 
-# Настройки классификации
-CLASSIFICATION_CONFIDENCE_THRESHOLD = float(os.getenv("CLASSIFICATION_CONFIDENCE_THRESHOLD", "0.95"))  # 95% уверенность
-ENABLE_ATTRIBUTE_MATCHING = os.getenv("ENABLE_ATTRIBUTE_MATCHING", "true").lower() == "true"
-ATTRIBUTE_WEIGHT = float(os.getenv("ATTRIBUTE_WEIGHT", "0.4"))  # Увеличен вес атрибутов
+# Веса для комбинирования методов поиска
+KEYWORD_WEIGHT = float(os.getenv("KEYWORD_WEIGHT", "0.7"))  # Вес поиска по ключевым словам
+VECTOR_WEIGHT = float(os.getenv("VECTOR_WEIGHT", "0.3"))  # Вес векторного поиска
+TITLE_WEIGHT = float(os.getenv("TITLE_WEIGHT", "0.5"))  # Бонус за совпадение названий
 
+# Пороги уверенности для разных типов совпадений
+EXACT_MATCH_CONFIDENCE = float(os.getenv("EXACT_MATCH_CONFIDENCE", "0.98"))  # Точное совпадение
+HIGH_MATCH_CONFIDENCE = float(os.getenv("HIGH_MATCH_CONFIDENCE", "0.95"))  # Высокое совпадение
+MEDIUM_MATCH_CONFIDENCE = float(os.getenv("MEDIUM_MATCH_CONFIDENCE", "0.90"))  # Среднее совпадение
+LOW_MATCH_CONFIDENCE = float(os.getenv("LOW_MATCH_CONFIDENCE", "0.85"))  # Низкое совпадение
+
+# Пороги для различных метрик
+KEYWORD_SCORE_THRESHOLD = float(os.getenv("KEYWORD_SCORE_THRESHOLD", "2.0"))  # Порог для ключевых слов
+TITLE_SIMILARITY_THRESHOLD = float(os.getenv("TITLE_SIMILARITY_THRESHOLD", "0.7"))  # Порог схожести названий
+VECTOR_SCORE_THRESHOLD = float(os.getenv("VECTOR_SCORE_THRESHOLD", "0.8"))  # Порог векторной схожести
+
+# Настройки обработки текста
+MIN_KEYWORD_LENGTH = int(os.getenv("MIN_KEYWORD_LENGTH", "3"))  # Минимальная длина ключевого слова
+MAX_DESCRIPTION_LENGTH = int(os.getenv("MAX_DESCRIPTION_LENGTH", "200"))  # Максимальная длина описания
+
+# Режим классификации
+CLASSIFICATION_MODE = os.getenv("CLASSIFICATION_MODE", "hybrid")  # hybrid, keywords_first, vectors_first
+
+# Настройки для категорий товаров
+ENABLE_CATEGORY_MAPPING = os.getenv("ENABLE_CATEGORY_MAPPING", "true").lower() == "true"
+CATEGORY_BOOST_FACTOR = float(os.getenv("CATEGORY_BOOST_FACTOR", "2.0"))  # Усиление для известных категорий
+
+# Логирование и отладка
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
+LOG_TOP_CANDIDATES = int(os.getenv("LOG_TOP_CANDIDATES", "5"))  # Количество кандидатов для логирования
+ENABLE_DEBUG_MODE = os.getenv("ENABLE_DEBUG_MODE", "false").lower() == "true"
+
+# Кэширование
+ENABLE_SEARCH_CACHE = os.getenv("ENABLE_SEARCH_CACHE", "true").lower() == "true"
+CACHE_TTL = int(os.getenv("CACHE_TTL", "3600"))  # Время жизни кэша в секундах
+
+# Производительность
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "4"))  # Количество воркеров для параллельной обработки
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))  # Таймаут запроса в секундах
+
+
+# Валидация конфигурации
+def validate_config():
+    """Проверка корректности конфигурации"""
+    errors = []
+
+    # Проверка весов
+    if abs(KEYWORD_WEIGHT + VECTOR_WEIGHT - 1.0) > 0.01:
+        errors.append("KEYWORD_WEIGHT + VECTOR_WEIGHT должны давать 1.0")
+
+    # Проверка порогов
+    if not (0 < LOW_MATCH_CONFIDENCE < MEDIUM_MATCH_CONFIDENCE < HIGH_MATCH_CONFIDENCE < EXACT_MATCH_CONFIDENCE <= 1.0):
+        errors.append("Пороги уверенности должны быть упорядочены по возрастанию")
+
+    # Проверка режима классификации
+    if CLASSIFICATION_MODE not in ["hybrid", "keywords_first", "vectors_first"]:
+        errors.append(f"Неизвестный режим классификации: {CLASSIFICATION_MODE}")
+
+    if errors:
+        print("⚠️ Ошибки конфигурации:")
+        for error in errors:
+            print(f"  - {error}")
+        raise ValueError("Некорректная конфигурация")
+    else:
+        print("✅ Конфигурация валидна")
+
+
+# Выполняем валидацию при импорте
+validate_config()
