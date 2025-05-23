@@ -1,265 +1,329 @@
-from fastapi import FastAPI, HTTPException, Request
+"""
+FastAPI сервис для KTRU классификатора
+"""
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-import uvicorn
-import logging
-import time
 from pydantic import BaseModel, Field
-from typing import List, Dict, Any, Optional
-from classifier import classify_sku
+from typing import List, Dict, Optional
+import time
+import logging
+import uvicorn
+
 from config import API_HOST, API_PORT
+from classifier import classify_product
+from vector_db import vector_db
+from embeddings import embedding_manager
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Создание приложения FastAPI
-app = FastAPI(title="KTRU Classification API")
+# Создание приложения
+app = FastAPI(
+    title="KTRU Classification API",
+    description="API для классификации товаров по КТРУ с использованием RAG",
+    version="2.0.0"
+)
 
-# Добавление поддержки CORS
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Разрешить запросы от всех источников (в производстве укажите конкретные домены)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# Модели Pydantic
+# Модели данных
 class Attribute(BaseModel):
     attr_name: str
     attr_value: str
 
 
-class PriceItem(BaseModel):
-    qnt: int
-    discount: float
-    price: float
+class ProductRequest(BaseModel):
+    title: str = Field(..., description="Название товара")
+    description: Optional[str] = Field(None, description="Описание товара")
+    category: Optional[str] = Field(None, description="Категория товара")
+    brand: Optional[str] = Field(None, description="Бренд")
+    attributes: Optional[List[Attribute]] = Field(None, description="Атрибуты товара")
 
-
-class SupplierOffer(BaseModel):
-    price: List[PriceItem]
-    stock: str
-    delivery_time: str
-    package_info: str
-    purchase_url: str
-
-
-class Supplier(BaseModel):
-    dealer_id: str
-    supplier_name: str
-    supplier_tel: str
-    supplier_address: str
-    supplier_description: str
-    supplier_offers: List[SupplierOffer]
-
-
-class SKUItem(BaseModel):
-    title: str
-    description: Optional[str] = None
-    article: Optional[str] = None
-    brand: Optional[str] = None
-    country_of_origin: Optional[str] = None
-    warranty_months: Optional[str] = None
-    category: Optional[str] = None
-    created_at: Optional[str] = None
-    attributes: Optional[List[Attribute]] = None
-    suppliers: Optional[List[Supplier]] = None
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "title": "Ноутбук ASUS X515EA",
+                "description": "Портативный компьютер для офисной работы",
+                "category": "Компьютеры",
+                "brand": "ASUS",
+                "attributes": [
+                    {"attr_name": "Процессор", "attr_value": "Intel Core i5"},
+                    {"attr_name": "ОЗУ", "attr_value": "8 ГБ"}
+                ]
+            }
+        }
 
 
 class ClassificationResponse(BaseModel):
-    ktru_code: str
-    ktru_title: Optional[str] = None  # Добавлено поле для названия КТРУ
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    processing_time: float
+    ktru_code: str = Field(..., description="Код КТРУ или 'код не найден'")
+    ktru_title: Optional[str] = Field(None, description="Название КТРУ")
+    confidence: float = Field(..., description="Уверенность классификации (0-1)")
+    processing_time: float = Field(..., description="Время обработки в секундах")
 
 
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Middleware для логирования запросов и измерения времени обработки"""
-    start_time = time.time()
-
-    # Логируем входящий запрос
-    logger.info(f"Входящий запрос: {request.method} {request.url}")
-
-    # Обрабатываем запрос
-    response = await call_next(request)
-
-    # Вычисляем время обработки
-    process_time = time.time() - start_time
-    response.headers["X-Process-Time"] = str(process_time)
-
-    # Логируем ответ
-    logger.info(f"Запрос обработан за {process_time:.4f} сек., статус: {response.status_code}")
-
-    return response
+class HealthResponse(BaseModel):
+    status: str
+    version: str
+    components: Dict[str, str]
 
 
-@app.post("/classify", response_model=ClassificationResponse)
-async def classify_item(sku: SKUItem):
-    """Endpoint для классификации товара по КТРУ"""
-    start_time = time.time()
-
-    try:
-        logger.info(f"Запрос на классификацию товара: {sku.title}")
-
-        # Вызываем функцию классификации
-        result = classify_sku(sku.dict())
-
-        # Вычисляем время обработки
-        processing_time = time.time() - start_time
-
-        # Обрабатываем результат классификации
-        if isinstance(result, dict):
-            # Новый формат возврата с кодом и названием
-            ktru_code = result.get('ktru_code', 'код не найден')
-            ktru_title = result.get('ktru_title', None)
-            confidence = result.get('confidence', 1.0 if ktru_code != 'код не найден' else 0.0)
-        elif isinstance(result, str):
-            # Старый формат (обратная совместимость)
-            ktru_code = result
-            ktru_title = None
-            confidence = 1.0 if result != "код не найден" else 0.0
-        else:
-            # Неожиданный формат
-            ktru_code = "код не найден"
-            ktru_title = None
-            confidence = 0.0
-
-        # Формируем ответ
-        return ClassificationResponse(
-            ktru_code=ktru_code,
-            ktru_title=ktru_title,
-            confidence=confidence,
-            processing_time=processing_time
-        )
-
-    except Exception as e:
-        logger.error(f"Ошибка при обработке запроса: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+class StatusResponse(BaseModel):
+    api: str
+    vector_db: str
+    embeddings: str
+    classifier: str
+    statistics: Optional[Dict] = None
 
 
-@app.get("/health")
-async def health_check():
-    """Endpoint для проверки работоспособности API"""
-    return {"status": "healthy", "version": "1.0.0"}
-
-
-@app.get("/status")
-async def system_status():
-    """Endpoint для проверки состояния всей системы"""
-    from qdrant_client import QdrantClient
-    from config import QDRANT_HOST, QDRANT_PORT, QDRANT_COLLECTION
-
-    status = {
-        "api": "healthy",
-        "qdrant": "unknown",
-        "collections": {},
-        "models": "unknown",
-        "timestamp": time.time()
+# Endpoints
+@app.get("/", tags=["General"])
+async def root():
+    """Корневой endpoint"""
+    return {
+        "message": "KTRU Classification API",
+        "version": "2.0.0",
+        "endpoints": {
+            "classify": "/classify",
+            "health": "/health",
+            "status": "/status",
+            "docs": "/docs"
+        }
     }
 
+
+@app.get("/health", response_model=HealthResponse, tags=["Monitoring"])
+async def health_check():
+    """Проверка здоровья сервиса"""
+    components = {}
+
+    # Проверка векторной БД
     try:
-        # Проверка Qdrant
-        qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-
-        # Получаем информацию о коллекциях
-        collections = qdrant_client.get_collections()
-        status["qdrant"] = "healthy"
-
-        for collection in collections.collections:
-            collection_info = qdrant_client.get_collection(collection.name)
-            collection_stats = qdrant_client.count(collection.name)
-
-            status["collections"][collection.name] = {
-                "vectors_count": collection_stats.count,
-                "vector_size": collection_info.config.params.vectors.size,
-                "distance": collection_info.config.params.vectors.distance.name,
-                "status": collection_info.status.name
-            }
-
-        # Проверяем, есть ли наша основная коллекция
-        if QDRANT_COLLECTION in status["collections"]:
-            status["ktru_loaded"] = status["collections"][QDRANT_COLLECTION]["vectors_count"] > 0
+        if vector_db.health_check():
+            components["vector_db"] = "healthy"
         else:
-            status["ktru_loaded"] = False
+            components["vector_db"] = "unhealthy"
+    except:
+        components["vector_db"] = "error"
 
-    except Exception as e:
-        status["qdrant"] = f"error: {str(e)}"
-        logger.error(f"Ошибка при проверке состояния Qdrant: {e}")
-
+    # Проверка эмбеддингов
     try:
-        # Проверяем модели
-        from embedding import embedding_model
-        if embedding_model and embedding_model.model:
-            status["models"] = "loaded"
+        info = embedding_manager.get_model_info()
+        components["embeddings"] = f"healthy (model: {info['model_name']})"
+    except:
+        components["embeddings"] = "error"
+
+    # Проверка классификатора
+    try:
+        from classifier import classifier
+        if classifier:
+            components["classifier"] = "healthy"
+            if classifier.llm:
+                components["llm"] = "loaded"
+            else:
+                components["llm"] = "not_loaded"
         else:
-            status["models"] = "not_loaded"
+            components["classifier"] = "error"
+    except:
+        components["classifier"] = "error"
+
+    # Определяем общий статус
+    all_healthy = all(
+        "healthy" in status or status == "loaded"
+        for status in components.values()
+    )
+
+    return HealthResponse(
+        status="healthy" if all_healthy else "degraded",
+        version="2.0.0",
+        components=components
+    )
+
+
+@app.get("/status", response_model=StatusResponse, tags=["Monitoring"])
+async def system_status():
+    """Детальный статус системы"""
+    status = StatusResponse(
+        api="healthy",
+        vector_db="unknown",
+        embeddings="unknown",
+        classifier="unknown"
+    )
+
+    # Статус векторной БД
+    try:
+        stats = vector_db.get_statistics()
+        status.vector_db = stats.get('status', 'unknown')
+        status.statistics = {
+            'total_vectors': stats.get('total_vectors', 0),
+            'categories': len(stats.get('categories', {}))
+        }
     except Exception as e:
-        status["models"] = f"error: {str(e)}"
+        status.vector_db = f"error: {str(e)}"
+
+    # Статус эмбеддингов
+    try:
+        info = embedding_manager.get_model_info()
+        status.embeddings = f"loaded ({info['model_name']})"
+    except Exception as e:
+        status.embeddings = f"error: {str(e)}"
+
+    # Статус классификатора
+    try:
+        from classifier import classifier
+        if classifier:
+            status.classifier = "loaded"
+            if classifier.llm:
+                status.classifier += " (with LLM)"
+            else:
+                status.classifier += " (without LLM)"
+        else:
+            status.classifier = "not_initialized"
+    except Exception as e:
+        status.classifier = f"error: {str(e)}"
 
     return status
 
 
-@app.get("/collections")
-async def get_collections_info():
-    """Подробная информация о коллекциях"""
-    from qdrant_client import QdrantClient
-    from config import QDRANT_HOST, QDRANT_PORT
+@app.post("/classify", response_model=ClassificationResponse, tags=["Classification"])
+async def classify_item(product: ProductRequest):
+    """
+    Классификация товара по КТРУ
+
+    Принимает данные о товаре и возвращает код КТРУ с уверенностью.
+    """
+    start_time = time.time()
 
     try:
-        qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-        collections = qdrant_client.get_collections()
+        logger.info(f"Запрос на классификацию: {product.title}")
 
-        detailed_info = {}
+        # Преобразуем в словарь для классификатора
+        product_data = product.model_dump()
 
-        for collection in collections.collections:
-            collection_info = qdrant_client.get_collection(collection.name)
-            collection_stats = qdrant_client.count(collection.name)
+        # Классифицируем
+        result = classify_product(product_data)
 
-            # Получаем примеры записей
+        # Время обработки
+        processing_time = time.time() - start_time
+
+        logger.info(
+            f"Результат: {result['ktru_code']} "
+            f"(уверенность: {result['confidence']:.3f}, время: {processing_time:.2f}с)"
+        )
+
+        return ClassificationResponse(
+            ktru_code=result['ktru_code'],
+            ktru_title=result.get('ktru_title'),
+            confidence=result['confidence'],
+            processing_time=processing_time
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка при классификации: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/batch_classify", tags=["Classification"])
+async def batch_classify(products: List[ProductRequest]):
+    """
+    Пакетная классификация товаров
+
+    Принимает список товаров и возвращает результаты классификации.
+    """
+    start_time = time.time()
+    results = []
+
+    try:
+        logger.info(f"Пакетная классификация {len(products)} товаров")
+
+        for product in products:
             try:
-                sample_points = qdrant_client.scroll(
-                    collection_name=collection.name,
-                    limit=3,
-                    with_payload=True,
-                    with_vectors=False
-                )
-                samples = [point.payload for point in sample_points[0]] if sample_points[0] else []
-            except:
-                samples = []
+                product_data = product.model_dump()
+                result = classify_product(product_data)
 
-            detailed_info[collection.name] = {
-                "vectors_count": collection_stats.count,
-                "vector_size": collection_info.config.params.vectors.size,
-                "distance": collection_info.config.params.vectors.distance.name,
-                "status": collection_info.status.name,
-                "optimizer_status": collection_info.optimizer_status,
-                "samples": samples
-            }
+                results.append({
+                    "input_title": product.title,
+                    "ktru_code": result['ktru_code'],
+                    "ktru_title": result.get('ktru_title'),
+                    "confidence": result['confidence'],
+                    "status": "success"
+                })
 
-        return {"collections": detailed_info, "total_collections": len(detailed_info)}
+            except Exception as e:
+                results.append({
+                    "input_title": product.title,
+                    "ktru_code": "ошибка",
+                    "ktru_title": None,
+                    "confidence": 0.0,
+                    "status": "error",
+                    "error": str(e)
+                })
+
+        total_time = time.time() - start_time
+
+        return {
+            "total_items": len(products),
+            "successful": sum(1 for r in results if r['status'] == 'success'),
+            "failed": sum(1 for r in results if r['status'] == 'error'),
+            "total_time": total_time,
+            "avg_time_per_item": total_time / len(products) if products else 0,
+            "results": results
+        }
 
     except Exception as e:
-        logger.error(f"Ошибка при получении информации о коллекциях: {e}")
-        raise HTTPException(status_code=500, detail=f"Ошибка получения данных: {str(e)}")
+        logger.error(f"Ошибка при пакетной классификации: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.exception_handler(Exception)
-async def global_exception_handler(request: Request, exc: Exception):
-    """Глобальный обработчик исключений"""
-    logger.error(f"Необработанное исключение: {exc}")
-    return JSONResponse(
-        status_code=500,
-        content={"error": "Внутренняя ошибка сервера", "detail": str(exc)}
-    )
+@app.get("/search", tags=["Search"])
+async def search_ktru(
+        query: str,
+        limit: int = 10
+):
+    """
+    Поиск KTRU кодов по запросу
 
-
-if __name__ == "__main__":
+    Выполняет векторный поиск по базе KTRU.
+    """
     try:
-        logger.info(f"Запуск API-сервиса на {API_HOST}:{API_PORT}")
-        uvicorn.run(app, host=API_HOST, port=API_PORT)
+        results = vector_db.search(query, top_k=limit)
+
+        return {
+            "query": query,
+            "count": len(results),
+            "results": [
+                {
+                    "ktru_code": r['payload'].get('ktru_code'),
+                    "title": r['payload'].get('title'),
+                    "score": r['score']
+                }
+                for r in results
+            ]
+        }
+
     except Exception as e:
-        logger.error(f"Ошибка при запуске API-сервиса: {e}")
+        logger.error(f"Ошибка при поиске: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Запуск сервера
+if __name__ == "__main__":
+    logger.info(f"Запуск API сервера на {API_HOST}:{API_PORT}")
+    uvicorn.run(
+        app,
+        host=API_HOST,
+        port=API_PORT,
+        log_level="info"
+    )

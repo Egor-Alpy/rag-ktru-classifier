@@ -1,184 +1,241 @@
+"""
+Модуль для создания векторных представлений текста
+Оптимизирован для GPU и batch processing
+"""
+
 import torch
 import numpy as np
-from transformers import AutoTokenizer, AutoModel
+from typing import List, Union
+from sentence_transformers import SentenceTransformer
 import logging
-from config import EMBEDDING_MODEL, VECTOR_SIZE
+from functools import lru_cache
+import gc
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+from config import EMBEDDING_MODEL, VECTOR_SIZE, DEVICE, BATCH_SIZE, USE_CACHE
+
 logger = logging.getLogger(__name__)
 
 
-class EmbeddingModel:
-    def __init__(self, model_name=EMBEDDING_MODEL):
-        """Инициализация модели для создания эмбеддингов"""
-        logger.info(f"Загрузка модели эмбеддингов: {model_name}")
+class EmbeddingManager:
+    """Менеджер для эффективной работы с эмбеддингами"""
 
-        # Определяем устройство
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        logger.info(f"Используемое устройство: {self.device}")
+    def __init__(self):
+        """Инициализация модели эмбеддингов"""
+        logger.info(f"Загрузка модели эмбеддингов: {EMBEDDING_MODEL}")
 
-        # Загрузка токенизера и модели
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name)
-        self.model.eval()  # Режим оценки
+        # Загружаем модель с оптимизациями
+        self.model = SentenceTransformer(EMBEDDING_MODEL, device=DEVICE)
 
-        # Переносим модель на нужное устройство
-        self.model = self.model.to(self.device)
+        # Включаем eval mode для inference
+        self.model.eval()
 
-        # Определяем реальную размерность модели
-        self._determine_model_dimension()
+        # Проверяем размерность
+        test_embedding = self.model.encode("test", convert_to_numpy=True)
+        self.vector_size = len(test_embedding)
 
-        logger.info(f"Модель эмбеддингов загружена на устройство: {self.device}")
-        logger.info(f"Размерность модели: {self.model_dimension}")
+        if self.vector_size != VECTOR_SIZE:
+            logger.warning(f"Размерность модели {self.vector_size} != конфигурации {VECTOR_SIZE}")
+            logger.info(f"Используем фактическую размерность: {self.vector_size}")
 
-    def _determine_model_dimension(self):
-        """Определяем реальную размерность модели"""
-        try:
-            # Тестовый запуск для определения размерности
-            test_text = "тест"
-            inputs = self.tokenizer(test_text, return_tensors="pt", truncation=True, max_length=512)
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        logger.info(f"✅ Модель загружена. Размерность: {self.vector_size}, Устройство: {DEVICE}")
 
-            with torch.no_grad():
-                outputs = self.model(**inputs)
+        # Кэш для эмбеддингов
+        if USE_CACHE:
+            self._cache = {}
 
-            # Используем CLS токен
-            test_embedding = outputs.last_hidden_state[:, 0, :].squeeze().cpu().numpy()
+    @lru_cache(maxsize=10000)
+    def _normalize_text(self, text: str) -> str:
+        """Нормализация текста для улучшения качества эмбеддингов"""
+        # Удаляем лишние пробелы
+        text = " ".join(text.split())
+        # Приводим к нижнему регистру для консистентности
+        text = text.lower()
+        return text.strip()
 
-            if test_embedding.ndim > 0:
-                self.model_dimension = len(test_embedding)
-            else:
-                self.model_dimension = test_embedding.shape[0] if hasattr(test_embedding, 'shape') else VECTOR_SIZE
+    def encode_single(self, text: str, normalize: bool = True) -> np.ndarray:
+        """Создание эмбеддинга для одного текста"""
+        if not text:
+            return np.zeros(self.vector_size)
 
-            logger.info(f"✅ Определена размерность модели: {self.model_dimension}")
+        # Нормализация
+        if normalize:
+            text = self._normalize_text(text)
 
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось определить размерность модели: {e}")
-            self.model_dimension = VECTOR_SIZE
+        # Проверяем кэш
+        if USE_CACHE and text in self._cache:
+            return self._cache[text]
 
-    def generate_embedding(self, text):
-        """Генерирует эмбеддинг для текста"""
-        if not text or text.strip() == "":
-            logger.warning("Получен пустой текст для эмбеддинга")
-            return np.zeros(self.model_dimension)
+        # Создаем эмбеддинг
+        with torch.no_grad():
+            embedding = self.model.encode(
+                text,
+                convert_to_numpy=True,
+                normalize_embeddings=True,  # L2 нормализация для косинусной метрики
+                show_progress_bar=False
+            )
 
-        try:
-            # Токенизация текста
-            inputs = self.tokenizer(text,
-                                    return_tensors="pt",
-                                    padding=True,
-                                    truncation=True,
-                                    max_length=512)
+        # Сохраняем в кэш
+        if USE_CACHE:
+            self._cache[text] = embedding
 
-            # Перемещаем тензоры на устройство модели
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        return embedding
 
-            # Генерируем эмбеддинг
-            with torch.no_grad():
-                outputs = self.model(**inputs)
+    def encode_batch(self, texts: List[str], normalize: bool = True) -> np.ndarray:
+        """Создание эмбеддингов для пакета текстов"""
+        if not texts:
+            return np.zeros((0, self.vector_size))
 
-            # Используем CLS токен как представление предложения
-            embedding = outputs.last_hidden_state[:, 0, :].squeeze().cpu().numpy()
+        # Нормализация
+        if normalize:
+            texts = [self._normalize_text(text) for text in texts]
 
-            # Преобразуем в одномерный массив, если размерность > 1
-            if embedding.ndim > 1 and embedding.shape[0] == 1:
-                embedding = embedding[0]
+        # Фильтруем пустые тексты
+        valid_indices = [i for i, text in enumerate(texts) if text]
+        valid_texts = [texts[i] for i in valid_indices]
 
-            # Проверяем корректность размерности
-            if len(embedding) != self.model_dimension:
-                logger.warning(
-                    f"Неожиданная размерность эмбеддинга: {len(embedding)}, ожидалась: {self.model_dimension}")
+        if not valid_texts:
+            return np.zeros((len(texts), self.vector_size))
 
-                # Простое решение для несоответствия размерности
-                if len(embedding) > self.model_dimension:
-                    embedding = embedding[:self.model_dimension]
-                else:
-                    # Дополняем нулями
-                    padding = np.zeros(self.model_dimension - len(embedding))
-                    embedding = np.concatenate([embedding, padding])
-
-            # Нормализуем вектор
-            norm = np.linalg.norm(embedding)
-            if norm > 0:
-                embedding = embedding / norm
-            else:
-                logger.warning("Получен нулевой вектор при нормализации")
-
-            return embedding
-
-        except Exception as e:
-            logger.error(f"Ошибка при создании эмбеддинга: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return np.zeros(self.model_dimension)
-
-    def generate_batch_embeddings(self, texts, batch_size=32):
-        """Генерирует эмбеддинги для пакета текстов"""
+        # Создаем эмбеддинги батчами
         embeddings = []
 
-        # Обрабатываем пакетами
-        for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i:i + batch_size]
-            batch_embeddings = []
+        for i in range(0, len(valid_texts), BATCH_SIZE):
+            batch = valid_texts[i:i + BATCH_SIZE]
 
-            for text in batch_texts:
-                embedding = self.generate_embedding(text)
-                batch_embeddings.append(embedding)
+            with torch.no_grad():
+                batch_embeddings = self.model.encode(
+                    batch,
+                    batch_size=BATCH_SIZE,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                    show_progress_bar=False
+                )
 
-            embeddings.extend(batch_embeddings)
+            embeddings.append(batch_embeddings)
 
-            if i % (batch_size * 10) == 0:  # Логируем каждые 10 пакетов
-                logger.info(f"Обработано {len(embeddings)}/{len(texts)} текстов")
+        # Объединяем результаты
+        all_embeddings = np.vstack(embeddings)
 
-        return embeddings
+        # Восстанавливаем порядок с учетом пустых текстов
+        result = np.zeros((len(texts), self.vector_size))
+        for idx, valid_idx in enumerate(valid_indices):
+            result[valid_idx] = all_embeddings[idx]
 
-    def test_embedding_quality(self):
-        """Тестирование качества эмбеддингов"""
-        logger.info("🧪 Тестирование качества эмбеддингов...")
+        return result
 
-        test_cases = [
-            "ноутбук компьютер",
-            "ручка канцелярские товары",
-            "стол мебель офисная",
-            "бумага копировальная",
-            "принтер оргтехника"
-        ]
+    def prepare_ktru_text(self, ktru_data: dict) -> str:
+        """Подготовка текста из KTRU записи для эмбеддинга"""
+        parts = []
 
-        embeddings = []
-        for text in test_cases:
-            emb = self.generate_embedding(text)
-            embeddings.append(emb)
-            logger.info(f"   '{text}' -> размерность: {len(emb)}, норма: {np.linalg.norm(emb):.3f}")
+        # Код KTRU
+        if ktru_data.get('ktru_code'):
+            parts.append(f"Код: {ktru_data['ktru_code']}")
 
-        # Проверяем схожесть между парами
-        logger.info("🔍 Схожесть между тестовыми эмбеддингами:")
-        for i in range(len(embeddings)):
-            for j in range(i + 1, len(embeddings)):
-                similarity = np.dot(embeddings[i], embeddings[j])
-                logger.info(f"   '{test_cases[i]}' <-> '{test_cases[j]}': {similarity:.3f}")
+        # Название - самое важное
+        if ktru_data.get('title'):
+            # Добавляем название дважды для увеличения веса
+            parts.append(ktru_data['title'])
+            parts.append(f"Товар: {ktru_data['title']}")
+
+        # Описание
+        if ktru_data.get('description'):
+            desc = ktru_data['description'][:200]  # Ограничиваем длину
+            parts.append(f"Описание: {desc}")
+
+        # Единица измерения
+        if ktru_data.get('unit'):
+            parts.append(f"Единица: {ktru_data['unit']}")
+
+        # Ключевые слова
+        if ktru_data.get('keywords'):
+            keywords = ' '.join(ktru_data['keywords'][:10])  # Максимум 10 ключевых слов
+            parts.append(f"Ключевые слова: {keywords}")
+
+        # Атрибуты - берем самые важные
+        if ktru_data.get('attributes'):
+            attr_texts = []
+            for attr in ktru_data['attributes'][:5]:  # Максимум 5 атрибутов
+                attr_name = attr.get('attr_name', '')
+
+                # Обработка значений
+                values = []
+                if 'attr_values' in attr:
+                    for val in attr['attr_values'][:3]:  # Максимум 3 значения
+                        if val.get('value'):
+                            values.append(val['value'])
+                elif 'attr_value' in attr:
+                    values.append(attr['attr_value'])
+
+                if attr_name and values:
+                    attr_texts.append(f"{attr_name}: {', '.join(values)}")
+
+            if attr_texts:
+                parts.append("Характеристики: " + "; ".join(attr_texts))
+
+        # Объединяем все части
+        return " | ".join(parts)
+
+    def prepare_product_text(self, product_data: dict) -> str:
+        """Подготовка текста из товара для эмбеддинга"""
+        parts = []
+
+        # Название
+        if product_data.get('title'):
+            parts.append(product_data['title'])
+
+        # Описание
+        if product_data.get('description'):
+            parts.append(product_data['description'])
+
+        # Категория
+        if product_data.get('category'):
+            parts.append(f"Категория: {product_data['category']}")
+
+        # Бренд
+        if product_data.get('brand') and product_data['brand'] != "Нет данных":
+            parts.append(f"Бренд: {product_data['brand']}")
+
+        # Атрибуты
+        if product_data.get('attributes'):
+            attr_texts = []
+            for attr in product_data['attributes']:
+                if isinstance(attr, dict):
+                    name = attr.get('attr_name', '')
+                    value = attr.get('attr_value', '')
+                    if name and value:
+                        attr_texts.append(f"{name}: {value}")
+
+            if attr_texts:
+                parts.append("Характеристики: " + "; ".join(attr_texts))
+
+        return " | ".join(parts)
+
+    def clear_cache(self):
+        """Очистка кэша эмбеддингов"""
+        if USE_CACHE:
+            self._cache.clear()
+            gc.collect()
+
+    def get_model_info(self) -> dict:
+        """Получение информации о модели"""
+        return {
+            "model_name": EMBEDDING_MODEL,
+            "vector_size": self.vector_size,
+            "device": str(self.model.device),
+            "cache_size": len(self._cache) if USE_CACHE else 0
+        }
 
 
-# Создаем глобальный экземпляр модели для многократного использования
-embedding_model = EmbeddingModel()
+# Глобальный экземпляр менеджера
+embedding_manager = EmbeddingManager()
 
 
-def generate_embedding(text):
-    """Функция-обертка для создания эмбеддинга"""
-    return embedding_model.generate_embedding(text)
+# Функции-обертки для обратной совместимости
+def encode_text(text: str) -> np.ndarray:
+    """Создание эмбеддинга для текста"""
+    return embedding_manager.encode_single(text)
 
 
-def generate_batch_embeddings(texts, batch_size=32):
-    """Функция-обертка для создания пакетных эмбеддингов"""
-    return embedding_model.generate_batch_embeddings(texts, batch_size)
-
-
-def test_embeddings():
-    """Функция для тестирования эмбеддингов"""
-    embedding_model.test_embedding_quality()
-
-
-# Автоматический тест при импорте (только в отладочном режиме)
-if __name__ == "__main__":
-    test_embeddings()
+def encode_texts(texts: List[str]) -> np.ndarray:
+    """Создание эмбеддингов для списка текстов"""
+    return embedding_manager.encode_batch(texts)

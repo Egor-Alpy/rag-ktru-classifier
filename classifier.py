@@ -1,505 +1,381 @@
-import re
-import torch
-import json
-import logging
-from typing import List, Dict, Optional, Tuple, Set
-from collections import defaultdict
-import numpy as np
-from difflib import SequenceMatcher
-from peft import AutoPeftModelForCausalLM
-from transformers import AutoTokenizer, GenerationConfig, LlamaTokenizer
-from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchText
-from embedding import generate_embedding
-from config import (
-    LLM_BASE_MODEL, LLM_ADAPTER_MODEL, QDRANT_HOST, QDRANT_PORT,
-    QDRANT_COLLECTION, TEMPERATURE, TOP_P, REPETITION_PENALTY,
-    MAX_NEW_TOKENS, TOP_K
-)
+"""
+RAG KTRU Классификатор с векторной БД и LLM
+Оптимизирован для RunPod с 24GB VRAM
+"""
 
-# Настройка логирования
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+import re
+import logging
+from typing import List, Dict, Optional, Tuple
+from dataclasses import dataclass
+import numpy as np
+from rapidfuzz import fuzz, process
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+
+from config import (
+    LLM_MODEL, LLM_MAX_LENGTH, LLM_TEMPERATURE, LLM_TOP_P, LLM_TOP_K,
+    SEARCH_TOP_K, RERANK_TOP_K, MIN_CONFIDENCE, WEIGHTS,
+    CATEGORY_MAPPINGS, STOP_WORDS, DEVICE
+)
+from embeddings import embedding_manager
+from vector_db import vector_db
+
 logger = logging.getLogger(__name__)
 
 
-class UtilityKtruClassifier:
-    def __init__(self):
-        """Инициализация утилитарного классификатора КТРУ"""
-        self.qdrant_client = self._setup_qdrant()
-        self.llm, self.tokenizer = self._setup_llm()
+@dataclass
+class ClassificationResult:
+    """Результат классификации"""
+    ktru_code: str
+    ktru_title: str
+    confidence: float
+    method: str  # Метод, который дал результат
+    details: Dict = None
 
-        # Компилируем шаблон для поиска КТРУ кода
+
+class KTRUClassifier:
+    """RAG классификатор KTRU с векторной БД и LLM"""
+
+    def __init__(self, use_llm: bool = True):
+        """
+        Инициализация классификатора
+
+        Args:
+            use_llm: Использовать ли LLM для финальной классификации
+        """
+        self.use_llm = use_llm
+        self.llm = None
+        self.tokenizer = None
+
+        # Паттерн для извлечения KTRU кода
         self.ktru_pattern = re.compile(r'\d{2}\.\d{2}\.\d{2}\.\d{3}-\d{8}')
 
-        # Создаем индекс ключевых слов для быстрого поиска
-        self.keyword_index = self._build_keyword_index()
+        # Загружаем LLM если нужно
+        if self.use_llm:
+            self._load_llm()
 
-        # Карта категорий товаров и их типичных кодов
-        self.category_patterns = {
-            # Компьютерная техника
-            'компьютер': {'codes': ['26.20.11', '26.20.13', '26.20.14'], 'weight': 1.0},
-            'ноутбук': {'codes': ['26.20.11', '26.20.13'], 'weight': 1.0},
-            'laptop': {'codes': ['26.20.11', '26.20.13'], 'weight': 1.0},
-            'пк': {'codes': ['26.20.11', '26.20.13'], 'weight': 0.9},
-            'системный блок': {'codes': ['26.20.11'], 'weight': 1.0},
-            'монитор': {'codes': ['26.20.17'], 'weight': 1.0},
-            'клавиатура': {'codes': ['26.20.16'], 'weight': 1.0},
-            'мышь': {'codes': ['26.20.16'], 'weight': 1.0},
-            'принтер': {'codes': ['26.20.16', '30.20'], 'weight': 1.0},
-            'сканер': {'codes': ['26.20.16'], 'weight': 1.0},
-            'мфу': {'codes': ['26.20.16'], 'weight': 1.0},
+        logger.info("✅ Классификатор инициализирован")
 
-            # Канцелярские товары
-            'ручка': {'codes': ['32.99.12', '32.99.13'], 'weight': 1.0},
-            'карандаш': {'codes': ['32.99.15'], 'weight': 1.0},
-            'маркер': {'codes': ['32.99.12'], 'weight': 1.0},
-            'фломастер': {'codes': ['32.99.12'], 'weight': 1.0},
-            'ластик': {'codes': ['22.19.71'], 'weight': 1.0},
-            'линейка': {'codes': ['32.99.15'], 'weight': 1.0},
-            'тетрадь': {'codes': ['17.23.13'], 'weight': 1.0},
-            'блокнот': {'codes': ['17.23.13'], 'weight': 1.0},
-            'степлер': {'codes': ['25.99.23'], 'weight': 1.0},
-            'скрепки': {'codes': ['25.93.18'], 'weight': 1.0},
-            'скотч': {'codes': ['22.21.21'], 'weight': 1.0},
-            'клей': {'codes': ['20.52'], 'weight': 1.0},
-
-            # Бумажная продукция
-            'бумага': {'codes': ['17.12.14', '17.23.12'], 'weight': 1.0},
-            'туалетная бумага': {'codes': ['17.22.12'], 'weight': 1.0},
-            'салфетки': {'codes': ['17.22.13'], 'weight': 1.0},
-            'полотенца бумажные': {'codes': ['17.22.13'], 'weight': 1.0},
-            'картон': {'codes': ['17.12.42'], 'weight': 1.0},
-
-            # Мебель
-            'стол': {'codes': ['31.01.11', '31.09.11'], 'weight': 1.0},
-            'стул': {'codes': ['31.01.11', '31.09.12'], 'weight': 1.0},
-            'кресло': {'codes': ['31.01.12', '31.09.12'], 'weight': 1.0},
-            'шкаф': {'codes': ['31.01.13', '31.09.13'], 'weight': 1.0},
-            'тумба': {'codes': ['31.09.13'], 'weight': 1.0},
-            'полка': {'codes': ['31.09.13'], 'weight': 1.0},
-            'диван': {'codes': ['31.09.11'], 'weight': 1.0},
-
-            # Медицинские товары
-            'шприц': {'codes': ['32.50.13'], 'weight': 1.0},
-            'бинт': {'codes': ['21.20.24'], 'weight': 1.0},
-            'маска': {'codes': ['32.50.22', '14.12.30'], 'weight': 1.0},
-            'перчатки': {'codes': ['22.19.60', '15.20.32'], 'weight': 1.0},
-            'термометр': {'codes': ['26.51.53'], 'weight': 1.0},
-            'тонометр': {'codes': ['26.60.12'], 'weight': 1.0},
-
-            # Продукты питания
-            'молоко': {'codes': ['10.51.11', '10.51.12'], 'weight': 1.0},
-            'хлеб': {'codes': ['10.71.11'], 'weight': 1.0},
-            'мясо': {'codes': ['10.11', '10.13'], 'weight': 1.0},
-            'рыба': {'codes': ['10.20'], 'weight': 1.0},
-            'овощи': {'codes': ['01.13'], 'weight': 1.0},
-            'фрукты': {'codes': ['01.24', '01.25'], 'weight': 1.0},
-        }
-
-        # Словарь синонимов
-        self.synonyms = {
-            'ноутбук': ['лэптоп', 'портативный компьютер', 'ноут', 'notebook', 'laptop'],
-            'компьютер': ['пк', 'персональный компьютер', 'комп', 'системный блок', 'десктоп'],
-            'ручка': ['авторучка', 'шариковая ручка', 'гелевая ручка', 'ручка для письма'],
-            'бумага': ['листы', 'бумажные листы', 'офисная бумага', 'писчая бумага'],
-            'стол': ['письменный стол', 'рабочий стол', 'офисный стол', 'парта'],
-            'принтер': ['печатающее устройство', 'лазерный принтер', 'струйный принтер'],
-        }
-
-    def _setup_qdrant(self):
-        """Настройка клиента Qdrant"""
+    def _load_llm(self):
+        """Загрузка квантизированной LLM модели"""
         try:
-            qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-            collections = qdrant_client.get_collections()
-            logger.info(f"✅ Qdrant подключен, коллекций: {len(collections.collections)}")
-            return qdrant_client
-        except Exception as e:
-            logger.error(f"Ошибка при настройке клиента Qdrant: {e}")
-            return None
+            logger.info(f"Загрузка LLM модели: {LLM_MODEL}")
 
-    def _setup_llm(self):
-        """Настройка языковой модели"""
-        try:
-            logger.info(f"Загрузка LLM для финальной классификации...")
-            tokenizer = AutoTokenizer.from_pretrained(LLM_BASE_MODEL, trust_remote_code=True)
+            # Конфигурация квантизации для экономии памяти
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4"
+            )
 
-            if tokenizer.pad_token is None:
-                tokenizer.pad_token = tokenizer.eos_token
+            # Загружаем токенизатор
+            self.tokenizer = AutoTokenizer.from_pretrained(LLM_MODEL)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            # Упрощенная загрузка модели
-            try:
-                model = AutoPeftModelForCausalLM.from_pretrained(
-                    LLM_ADAPTER_MODEL,
-                    device_map="auto",
-                    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32
-                )
-                logger.info("✅ LLM загружена")
-            except:
-                logger.warning("⚠️ LLM недоступна, будет использоваться только rule-based подход")
-                return None, None
+            # Загружаем модель с квантизацией
+            self.llm = AutoModelForCausalLM.from_pretrained(
+                LLM_MODEL,
+                quantization_config=quantization_config,
+                device_map="auto",
+                trust_remote_code=True,
+                torch_dtype=torch.float16
+            )
 
-            return model, tokenizer
+            # Переводим в eval режим
+            self.llm.eval()
+
+            logger.info("✅ LLM модель загружена с 4-bit квантизацией")
+
         except Exception as e:
             logger.error(f"Ошибка загрузки LLM: {e}")
-            return None, None
+            logger.warning("Продолжаем без LLM")
+            self.use_llm = False
+            self.llm = None
+            self.tokenizer = None
 
-    def _build_keyword_index(self):
-        """Строим индекс ключевых слов из базы КТРУ"""
-        keyword_index = defaultdict(list)
-
-        if not self.qdrant_client:
-            return keyword_index
-
-        try:
-            # Получаем все записи для построения индекса
-            offset = None
-            batch_size = 100
-
-            while True:
-                records, offset = self.qdrant_client.scroll(
-                    collection_name=QDRANT_COLLECTION,
-                    limit=batch_size,
-                    offset=offset,
-                    with_payload=True,
-                    with_vectors=False
-                )
-
-                if not records:
-                    break
-
-                for record in records:
-                    payload = record.payload
-                    ktru_code = payload.get('ktru_code', '')
-                    title = payload.get('title', '').lower()
-
-                    # Извлекаем ключевые слова из названия
-                    words = re.findall(r'\b[а-яё]+\b', title, re.IGNORECASE)
-                    for word in words:
-                        if len(word) > 2:  # Игнорируем короткие слова
-                            keyword_index[word].append({
-                                'code': ktru_code,
-                                'title': payload.get('title', ''),
-                                'full_data': payload
-                            })
-
-                if offset is None:
-                    break
-
-            logger.info(f"✅ Построен индекс из {len(keyword_index)} ключевых слов")
-
-        except Exception as e:
-            logger.error(f"Ошибка при построении индекса: {e}")
-
-        return keyword_index
-
-    def _extract_keywords(self, text):
+    def _extract_keywords(self, text: str) -> List[str]:
         """Извлечение ключевых слов из текста"""
         text_lower = text.lower()
 
-        # Ищем важные слова для классификации
-        keywords = []
+        # Удаляем знаки препинания
+        text_clean = re.sub(r'[^\w\s]', ' ', text_lower)
 
-        # Проверяем паттерны категорий
-        for pattern, info in self.category_patterns.items():
-            if pattern in text_lower:
-                keywords.append((pattern, info['weight']))
+        # Разбиваем на слова
+        words = text_clean.split()
 
-        # Проверяем синонимы
-        for main_word, synonyms in self.synonyms.items():
-            if main_word in text_lower:
-                keywords.append((main_word, 1.0))
-            for synonym in synonyms:
-                if synonym in text_lower:
-                    keywords.append((main_word, 0.9))  # Синонимы имеют чуть меньший вес
+        # Фильтруем стоп-слова и короткие слова
+        keywords = [w for w in words if w not in STOP_WORDS and len(w) > 2]
 
-        # Извлекаем все существенные слова
-        words = re.findall(r'\b[а-яёa-z]{3,}\b', text_lower, re.IGNORECASE)
-        for word in words:
-            if word not in [kw[0] for kw in keywords]:
-                keywords.append((word, 0.5))
+        # Добавляем биграммы для важных слов
+        bigrams = []
+        for i in range(len(words) - 1):
+            if words[i] not in STOP_WORDS and words[i + 1] not in STOP_WORDS:
+                bigrams.append(f"{words[i]} {words[i + 1]}")
 
-        return keywords
+        return keywords + bigrams
 
-    def _search_by_keywords(self, keywords, limit=20):
-        """Поиск КТРУ по ключевым словам"""
-        candidates = defaultdict(float)
+    def _calculate_keyword_score(self, product_text: str, ktru_data: Dict) -> float:
+        """Расчет совпадения по ключевым словам"""
+        product_keywords = set(self._extract_keywords(product_text))
 
-        for keyword, weight in keywords:
-            # Ищем в индексе ключевых слов
-            if keyword in self.keyword_index:
-                for item in self.keyword_index[keyword]:
-                    candidates[item['code']] += weight
+        # Извлекаем ключевые слова из KTRU
+        ktru_text = f"{ktru_data.get('title', '')} {ktru_data.get('description', '')}"
+        ktru_keywords = set(self._extract_keywords(ktru_text))
 
-            # Ищем по паттернам категорий
-            if keyword in self.category_patterns:
-                pattern_info = self.category_patterns[keyword]
-                for code_prefix in pattern_info['codes']:
-                    # Ищем все коды, начинающиеся с этого префикса
-                    for kw_items in self.keyword_index.values():
-                        for item in kw_items:
-                            if item['code'].startswith(code_prefix):
-                                candidates[item['code']] += pattern_info[
-                                                                'weight'] * 2  # Удваиваем вес для точных категорий
+        # Добавляем явные ключевые слова если есть
+        if ktru_data.get('keywords'):
+            ktru_keywords.update([kw.lower() for kw in ktru_data['keywords']])
 
-        # Сортируем по весу
-        sorted_candidates = sorted(candidates.items(), key=lambda x: x[1], reverse=True)
-
-        # Получаем полную информацию о топ кандидатах
-        result = []
-        for code, score in sorted_candidates[:limit]:
-            # Находим полную информацию о коде
-            for kw_items in self.keyword_index.values():
-                for item in kw_items:
-                    if item['code'] == code:
-                        result.append({
-                            'code': code,
-                            'score': score,
-                            'data': item['full_data']
-                        })
-                        break
-                if len(result) > len([r for r in result if r['code'] != code]):
-                    break
-
-        return result
-
-    def _calculate_title_similarity(self, sku_title, ktru_title):
-        """Расчет схожести названий"""
-        sku_words = set(re.findall(r'\b[а-яёa-z]+\b', sku_title.lower(), re.IGNORECASE))
-        ktru_words = set(re.findall(r'\b[а-яёa-z]+\b', ktru_title.lower(), re.IGNORECASE))
-
-        if not sku_words or not ktru_words:
+        # Считаем пересечение
+        if not ktru_keywords:
             return 0.0
 
-        # Прямое совпадение слов
-        common_words = sku_words.intersection(ktru_words)
-        word_similarity = len(common_words) / min(len(sku_words), len(ktru_words))
+        intersection = len(product_keywords & ktru_keywords)
+        union = len(product_keywords | ktru_keywords)
 
-        # Проверка последовательности символов
-        sequence_similarity = SequenceMatcher(None, sku_title.lower(), ktru_title.lower()).ratio()
+        return intersection / union if union > 0 else 0.0
 
-        # Комбинированная оценка
-        return word_similarity * 0.7 + sequence_similarity * 0.3
+    def _calculate_fuzzy_score(self, product_title: str, ktru_title: str) -> float:
+        """Расчет нечеткого совпадения названий"""
+        # Нормализуем названия
+        product_title = product_title.lower().strip()
+        ktru_title = ktru_title.lower().strip()
 
-    def _hybrid_search(self, sku_data, top_k=50):
-        """Гибридный поиск: ключевые слова + векторный поиск"""
-        title = sku_data.get('title', '')
-        description = sku_data.get('description', '')
+        # Используем различные метрики
+        ratio = fuzz.ratio(product_title, ktru_title) / 100
+        partial_ratio = fuzz.partial_ratio(product_title, ktru_title) / 100
+        token_sort = fuzz.token_sort_ratio(product_title, ktru_title) / 100
 
-        # Извлекаем ключевые слова
-        keywords = self._extract_keywords(f"{title} {description}")
+        # Комбинируем метрики
+        return max(ratio, partial_ratio * 0.9, token_sort * 0.85)
 
-        # Поиск по ключевым словам
-        keyword_results = self._search_by_keywords(keywords, limit=30)
+    def _check_category_match(self, product_data: Dict, ktru_code: str) -> float:
+        """Проверка соответствия категории"""
+        product_text = f"{product_data.get('title', '')} {product_data.get('category', '')}".lower()
 
-        # Векторный поиск для дополнения результатов
-        search_text = f"{title} {description}"
-        if sku_data.get('category'):
-            search_text += f" категория: {sku_data['category']}"
-        if sku_data.get('brand'):
-            search_text += f" бренд: {sku_data['brand']}"
+        # Проверяем известные категории
+        for category_key, code_prefixes in CATEGORY_MAPPINGS.items():
+            if category_key in product_text:
+                for prefix in code_prefixes:
+                    if ktru_code.startswith(prefix):
+                        return 1.0
 
-        embedding = generate_embedding(search_text)
+        return 0.0
 
-        vector_results = []
-        if self.qdrant_client:
-            try:
-                search_result = self.qdrant_client.search(
-                    collection_name=QDRANT_COLLECTION,
-                    query_vector=embedding.tolist(),
-                    limit=top_k
-                )
+    def _rerank_candidates(self, product_data: Dict, candidates: List[Dict]) -> List[Tuple[Dict, float]]:
+        """Переранжирование кандидатов с учетом всех метрик"""
+        product_text = embedding_manager.prepare_product_text(product_data)
+        product_title = product_data.get('title', '')
 
-                for result in search_result:
-                    vector_results.append({
-                        'code': result.payload.get('ktru_code', ''),
-                        'score': getattr(result, 'score', 0),
-                        'data': result.payload
-                    })
-            except Exception as e:
-                logger.error(f"Ошибка векторного поиска: {e}")
+        reranked = []
 
-        # Объединяем результаты
-        all_results = {}
+        for candidate in candidates:
+            ktru_data = candidate['payload']
 
-        # Сначала добавляем результаты по ключевым словам (они приоритетнее)
-        for item in keyword_results:
-            code = item['code']
-            all_results[code] = {
-                'code': code,
-                'keyword_score': item['score'],
-                'vector_score': 0,
-                'data': item['data']
-            }
+            # Векторное сходство (уже есть)
+            vector_score = candidate['score']
 
-        # Добавляем векторные результаты
-        for item in vector_results:
-            code = item['code']
-            if code in all_results:
-                all_results[code]['vector_score'] = item['score']
-            else:
-                all_results[code] = {
-                    'code': code,
-                    'keyword_score': 0,
-                    'vector_score': item['score'],
-                    'data': item['data']
-                }
+            # Совпадение ключевых слов
+            keyword_score = self._calculate_keyword_score(product_text, ktru_data)
 
-        # Вычисляем финальный скор
-        final_results = []
-        for code, scores in all_results.items():
-            # Приоритет отдаем поиску по ключевым словам
-            final_score = scores['keyword_score'] * 0.7 + scores['vector_score'] * 0.3
+            # Нечеткое совпадение названий
+            fuzzy_score = self._calculate_fuzzy_score(product_title, ktru_data.get('title', ''))
 
-            # Бонус за совпадение названий
-            ktru_title = scores['data'].get('title', '')
-            title_similarity = self._calculate_title_similarity(title, ktru_title)
-            final_score += title_similarity * 0.5
+            # Проверка категории
+            category_score = self._check_category_match(product_data, ktru_data.get('ktru_code', ''))
 
-            final_results.append({
-                'code': code,
-                'score': final_score,
-                'data': scores['data'],
-                'keyword_score': scores['keyword_score'],
-                'vector_score': scores['vector_score'],
-                'title_similarity': title_similarity
-            })
+            # Комбинированный скор
+            final_score = (
+                    vector_score * WEIGHTS['vector_similarity'] +
+                    keyword_score * WEIGHTS['keyword_match'] +
+                    fuzzy_score * WEIGHTS['fuzzy_match'] +
+                    category_score * WEIGHTS['category_match']
+            )
+
+            # Бонус за точное совпадение слов в названии
+            title_words = set(product_title.lower().split())
+            ktru_title_words = set(ktru_data.get('title', '').lower().split())
+            exact_matches = len(title_words & ktru_title_words)
+            if exact_matches > 1:
+                final_score *= (1 + 0.1 * exact_matches)
+
+            reranked.append((ktru_data, final_score))
 
         # Сортируем по финальному скору
-        final_results.sort(key=lambda x: x['score'], reverse=True)
+        reranked.sort(key=lambda x: x[1], reverse=True)
 
-        return final_results[:top_k]
+        return reranked[:RERANK_TOP_K]
 
-    def classify_sku(self, sku_data, top_k=TOP_K):
-        """Классификация SKU по КТРУ коду"""
-        logger.info(f"🚀 Классификация: {sku_data.get('title', 'Без названия')}")
-
-        if not self.qdrant_client:
-            logger.error("❌ Qdrant клиент не инициализирован")
-            return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
+    def _classify_with_llm(self, product_data: Dict, candidates: List[Tuple[Dict, float]]) -> Optional[str]:
+        """Классификация с помощью LLM"""
+        if not self.llm or not candidates:
+            return None
 
         try:
-            # Гибридный поиск
-            search_results = self._hybrid_search(sku_data, top_k=top_k)
+            # Формируем промпт
+            prompt = self._create_classification_prompt(product_data, candidates)
 
-            if not search_results:
-                logger.warning("⚠️ Не найдено подходящих КТРУ кодов")
-                return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
+            # Токенизация
+            inputs = self.tokenizer(
+                prompt,
+                return_tensors="pt",
+                truncation=True,
+                max_length=LLM_MAX_LENGTH
+            ).to(self.llm.device)
 
-            # Логируем топ результаты
-            logger.info(f"📊 Топ-5 кандидатов:")
-            for i, result in enumerate(search_results[:5]):
-                logger.info(f"   {i + 1}. {result['code']} | Скор: {result['score']:.3f} | "
-                            f"KW: {result['keyword_score']:.2f} | Vec: {result['vector_score']:.2f} | "
-                            f"Title: {result['title_similarity']:.2f} | {result['data'].get('title', '')[:50]}...")
+            # Генерация
+            with torch.no_grad():
+                outputs = self.llm.generate(
+                    **inputs,
+                    max_new_tokens=50,
+                    temperature=LLM_TEMPERATURE,
+                    top_p=LLM_TOP_P,
+                    top_k=LLM_TOP_K,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id
+                )
 
-            # Проверяем топ результат
-            best_match = search_results[0]
+            # Декодирование
+            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            response = response[len(prompt):].strip()
 
-            # Если есть явный победитель по ключевым словам
-            if best_match['keyword_score'] > 2.0 and best_match['title_similarity'] > 0.5:
-                confidence = min(0.98, 0.7 + best_match['title_similarity'] * 0.3)
-                logger.info(f"✅ Найдено совпадение по ключевым словам с уверенностью {confidence:.3f}")
-                return {
-                    "ktru_code": best_match['code'],
-                    "ktru_title": best_match['data'].get('title', None),
-                    "confidence": confidence
-                }
+            # Извлекаем KTRU код из ответа
+            match = self.ktru_pattern.search(response)
+            if match:
+                suggested_code = match.group(0)
 
-            # Если есть хорошее совпадение по названию
-            if best_match['title_similarity'] > 0.7:
-                confidence = min(0.95, 0.6 + best_match['title_similarity'] * 0.35)
-                logger.info(f"✅ Найдено совпадение по названию с уверенностью {confidence:.3f}")
-                return {
-                    "ktru_code": best_match['code'],
-                    "ktru_title": best_match['data'].get('title', None),
-                    "confidence": confidence
-                }
+                # Проверяем, что код есть среди кандидатов
+                for ktru_data, _ in candidates:
+                    if ktru_data.get('ktru_code') == suggested_code:
+                        return suggested_code
 
-            # Если нужна дополнительная проверка с LLM
-            if self.llm and self.tokenizer and len(search_results) > 1:
-                # Используем LLM только для неоднозначных случаев
-                logger.info("🤖 Используем LLM для уточнения...")
-
-                prompt = self._create_simple_prompt(sku_data, search_results[:5])
-
-                try:
-                    inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
-                    inputs = {k: v.to(self.llm.device) for k, v in inputs.items()}
-
-                    generation_config = GenerationConfig(
-                        temperature=0.1,
-                        top_p=0.9,
-                        max_new_tokens=50,
-                        do_sample=True,
-                        pad_token_id=self.tokenizer.pad_token_id,
-                        eos_token_id=self.tokenizer.eos_token_id
-                    )
-
-                    with torch.no_grad():
-                        generated_ids = self.llm.generate(**inputs, generation_config=generation_config)
-
-                    response = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-                    response = response[len(prompt):].strip()
-
-                    logger.info(f"🤖 Ответ LLM: '{response}'")
-
-                    # Проверяем ответ
-                    ktru_match = self.ktru_pattern.search(response)
-                    if ktru_match:
-                        ktru_code = ktru_match.group(0)
-                        # Проверяем, что код есть в наших кандидатах
-                        for result in search_results[:5]:
-                            if result['code'] == ktru_code:
-                                return {
-                                    "ktru_code": ktru_code,
-                                    "ktru_title": result['data'].get('title', None),
-                                    "confidence": 0.90
-                                }
-                except Exception as e:
-                    logger.error(f"Ошибка при использовании LLM: {e}")
-
-            # Если уверенность недостаточна, но есть результат
-            if best_match['score'] > 1.0:
-                confidence = min(0.85, 0.5 + best_match['score'] * 0.1)
-                logger.info(f"⚠️ Найдено возможное совпадение с уверенностью {confidence:.3f}")
-                return {
-                    "ktru_code": best_match['code'],
-                    "ktru_title": best_match['data'].get('title', None),
-                    "confidence": confidence
-                }
-
-            # Если ничего не подходит
-            logger.info("❌ Не найдено подходящего КТРУ кода")
-            return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
+            return None
 
         except Exception as e:
-            logger.error(f"❌ Ошибка при классификации: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
+            logger.error(f"Ошибка при классификации с LLM: {e}")
+            return None
 
-    def _create_simple_prompt(self, sku_data, candidates):
-        """Создание упрощенного промпта для LLM"""
-        prompt = f"""Определи КТРУ код для товара.
+    def _create_classification_prompt(self, product_data: Dict, candidates: List[Tuple[Dict, float]]) -> str:
+        """Создание промпта для LLM"""
+        prompt = f"""Задача: Определить точный код КТРУ для товара.
 
-ТОВАР: {sku_data.get('title', '')}
-{f"Описание: {sku_data.get('description', '')}" if sku_data.get('description') else ""}
+ТОВАР:
+Название: {product_data.get('title', '')}
+Описание: {product_data.get('description', '')}
+Категория: {product_data.get('category', '')}
 
-КАНДИДАТЫ КТРУ:
+КАНДИДАТЫ КТРУ (отсортированы по релевантности):
 """
-        for i, candidate in enumerate(candidates, 1):
-            prompt += f"{i}. {candidate['code']} - {candidate['data'].get('title', '')}\n"
 
-        prompt += "\nВыбери НАИБОЛЕЕ ПОДХОДЯЩИЙ код из списка выше. Ответь только кодом:"
+        for i, (ktru_data, score) in enumerate(candidates[:5], 1):
+            prompt += f"\n{i}. Код: {ktru_data.get('ktru_code', '')}"
+            prompt += f"\n   Название: {ktru_data.get('title', '')}"
+            prompt += f"\n   Релевантность: {score:.2f}"
+
+        prompt += "\n\nВыбери НАИБОЛЕЕ ПОДХОДЯЩИЙ код КТРУ из списка выше. Ответь только кодом:"
 
         return prompt
 
+    def classify(self, product_data: Dict) -> ClassificationResult:
+        """
+        Основной метод классификации товара
 
-# Создаем глобальный экземпляр классификатора
-classifier = UtilityKtruClassifier()
+        Args:
+            product_data: Словарь с данными товара
+
+        Returns:
+            ClassificationResult с результатом классификации
+        """
+        logger.info(f"Классификация товара: {product_data.get('title', 'Без названия')}")
+
+        # Подготовка текста для поиска
+        search_text = embedding_manager.prepare_product_text(product_data)
+
+        # Векторный поиск
+        logger.debug("Выполняем векторный поиск...")
+        search_results = vector_db.search(search_text, top_k=SEARCH_TOP_K)
+
+        if not search_results:
+            logger.warning("Векторный поиск не дал результатов")
+            return ClassificationResult(
+                ktru_code="код не найден",
+                ktru_title="",
+                confidence=0.0,
+                method="no_results"
+            )
+
+        # Переранжирование кандидатов
+        logger.debug("Переранжирование кандидатов...")
+        reranked_candidates = self._rerank_candidates(product_data, search_results)
+
+        # Логируем топ кандидатов
+        logger.info("Топ-5 кандидатов после переранжирования:")
+        for i, (ktru_data, score) in enumerate(reranked_candidates[:5], 1):
+            logger.info(f"  {i}. {ktru_data.get('ktru_code')} | {score:.3f} | {ktru_data.get('title', '')[:50]}...")
+
+        # Проверяем лучший результат
+        best_ktru, best_score = reranked_candidates[0]
+
+        # Если скор очень высокий, возвращаем сразу
+        if best_score >= 0.9:
+            return ClassificationResult(
+                ktru_code=best_ktru.get('ktru_code', ''),
+                ktru_title=best_ktru.get('title', ''),
+                confidence=min(best_score, 0.99),
+                method="high_confidence",
+                details={'score': best_score}
+            )
+
+        # Если скор средний и есть LLM, используем её для уточнения
+        if self.use_llm and self.llm and best_score >= 0.6:
+            logger.debug("Используем LLM для уточнения...")
+            llm_code = self._classify_with_llm(product_data, reranked_candidates)
+
+            if llm_code:
+                # Находим данные для кода от LLM
+                for ktru_data, score in reranked_candidates:
+                    if ktru_data.get('ktru_code') == llm_code:
+                        return ClassificationResult(
+                            ktru_code=llm_code,
+                            ktru_title=ktru_data.get('title', ''),
+                            confidence=min(score * 1.1, 0.95),  # Boost за подтверждение LLM
+                            method="llm_confirmed",
+                            details={'original_score': score, 'llm_boost': True}
+                        )
+
+        # Возвращаем лучший результат если он выше порога
+        if best_score >= MIN_CONFIDENCE:
+            return ClassificationResult(
+                ktru_code=best_ktru.get('ktru_code', ''),
+                ktru_title=best_ktru.get('title', ''),
+                confidence=best_score,
+                method="threshold_passed",
+                details={'score': best_score}
+            )
+
+        # Не найдено подходящего кода
+        return ClassificationResult(
+            ktru_code="код не найден",
+            ktru_title="",
+            confidence=best_score,
+            method="below_threshold",
+            details={'best_score': best_score, 'best_code': best_ktru.get('ktru_code', '')}
+        )
 
 
-def classify_sku(sku_data: Dict, top_k: int = TOP_K) -> Dict:
-    """Функция-обертка для классификации SKU"""
-    return classifier.classify_sku(sku_data, top_k)
+# Глобальный экземпляр классификатора
+classifier = KTRUClassifier(use_llm=True)
+
+
+def classify_product(product_data: Dict) -> Dict:
+    """Функция-обертка для обратной совместимости"""
+    result = classifier.classify(product_data)
+
+    return {
+        'ktru_code': result.ktru_code,
+        'ktru_title': result.ktru_title,
+        'confidence': result.confidence
+    }

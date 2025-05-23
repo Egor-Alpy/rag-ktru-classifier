@@ -1,210 +1,53 @@
 #!/bin/bash
 
-# Получаем текущую директорию
-CURRENT_DIR=$(pwd)
-PROJECT_DIR="/workspace/rag-ktru-classifier"
+# RAG KTRU Classifier - Startup Script
+# Оптимизирован для RunPod
 
-# Переходим в директорию проекта, если не в ней
-if [ "$CURRENT_DIR" != "$PROJECT_DIR" ]; then
-    echo "🔄 Переход в директорию проекта: $PROJECT_DIR"
-    cd "$PROJECT_DIR" || {
-        echo "❌ Ошибка: Не удалось перейти в $PROJECT_DIR"
-        exit 1
-    }
+set -e
+
+echo "🚀 RAG KTRU Classifier - Starting System"
+echo "========================================"
+
+# Проверка окружения
+if [ -f /workspace/rag-ktru-classifier ]; then
+    cd /workspace/rag-ktru-classifier
+else
+    cd "$(dirname "$0")"
 fi
 
 # Создание необходимых директорий
-mkdir -p logs qdrant_storage models data
+echo "📁 Creating directories..."
+mkdir -p data models logs qdrant_storage
 
-echo "🚀 Запуск сервисов классификации КТРУ из $PROJECT_DIR..."
+# Проверка Python
+echo "🐍 Checking Python..."
+python --version
 
-# Проверка наличия Qdrant в проекте
-if [ ! -f "./qdrant" ]; then
-    echo "📥 Qdrant не найден. Загружаем..."
-    curl -L https://github.com/qdrant/qdrant/releases/download/v1.7.4/qdrant-x86_64-unknown-linux-gnu.tar.gz -o qdrant.tar.gz
-    tar -xzf qdrant.tar.gz
-    rm qdrant.tar.gz
-    chmod +x qdrant
-fi
-
-# Добавить проверку наличия curl
-if ! command -v curl &> /dev/null; then
-    echo "📦 curl не установлен, устанавливаем..."
-    apt-get update && apt-get install -y curl
-fi
-
-# Проверяем, что Python зависимости установлены
-if ! python -c "import fastapi" 2>/dev/null; then
-    echo "📦 Python зависимости не установлены. Устанавливаем..."
+# Установка зависимостей если нужно
+if ! python -c "import torch" 2>/dev/null; then
+    echo "📦 Installing dependencies..."
     pip install -r requirements.txt
 fi
 
-# Функция для проверки JSON файла КТРУ
-check_ktru_json() {
-    local json_path="${KTRU_JSON_PATH:-$PROJECT_DIR/data/ktru_data.json}"
+# Проверка наличия Qdrant
+QDRANT_PID=""
+if ! curl -s http://localhost:6333/collections > /dev/null 2>&1; then
+    echo "🔄 Starting Qdrant..."
 
-    if [ -f "$json_path" ]; then
-        local file_size=$(stat -f%z "$json_path" 2>/dev/null || stat -c%s "$json_path" 2>/dev/null || echo "0")
-        local file_size_mb=$((file_size / 1024 / 1024))
-
-        echo "📄 JSON файл КТРУ найден:"
-        echo "   - Путь: $json_path"
-        echo "   - Размер: ${file_size_mb} МБ"
-
-        if [ "$file_size" -gt 100 ]; then
-            echo "   ✅ JSON файл готов для использования"
-            return 0
-        else
-            echo "   ⚠️  JSON файл слишком мал (возможно поврежден)"
-            return 1
-        fi
-    else
-        echo "📄 JSON файл КТРУ не найден: $json_path"
-        echo "   ℹ️  Поместите файл с данными КТРУ в указанный путь для работы в автономном режиме"
-        return 1
+    # Загрузка Qdrant если нет
+    if [ ! -f "./qdrant" ]; then
+        echo "📥 Downloading Qdrant..."
+        curl -L https://github.com/qdrant/qdrant/releases/download/v1.7.4/qdrant-x86_64-unknown-linux-gnu.tar.gz -o qdrant.tar.gz
+        tar -xzf qdrant.tar.gz
+        rm qdrant.tar.gz
+        chmod +x qdrant
     fi
-}
 
-# Функция для загрузки примера JSON (если нужно)
-download_sample_json() {
-    local json_path="${KTRU_JSON_PATH:-$PROJECT_DIR/data/ktru_data.json}"
-
-    echo "📥 Хотите скачать образец JSON файла КТРУ? (y/N)"
-    read -t 10 -r response || response="n"
-
-    if [[ "$response" =~ ^[Yy]$ ]]; then
-        echo "📥 Загрузка образца JSON..."
-        # Здесь можно добавить URL для загрузки образца
-        # curl -L "https://example.com/ktru_sample.json" -o "$json_path"
-        echo "⚠️  URL для загрузки образца не настроен. Создайте файл вручную."
-    fi
-}
-
-# Функция для проверки состояния Qdrant
-check_qdrant_status() {
-    local max_attempts=30
-    local attempt=1
-
-    echo "⏳ Ожидание запуска Qdrant..."
-
-    while [ $attempt -le $max_attempts ]; do
-        if curl -s http://localhost:6333/collections > /dev/null 2>&1; then
-            echo "✅ Qdrant успешно запущен!"
-
-            # Получаем информацию о коллекциях
-            echo "📊 Проверка состояния векторной БД..."
-            python3 -c "
-import requests
-import json
-
-try:
-    response = requests.get('http://localhost:6333/collections')
-    if response.status_code == 200:
-        data = response.json()
-        collections = data.get('result', {}).get('collections', [])
-
-        if collections:
-            print(f'📚 Найдено коллекций: {len(collections)}')
-
-            for collection in collections:
-                name = collection.get('name', 'unknown')
-                try:
-                    # Получаем статистику коллекции
-                    count_response = requests.get(f'http://localhost:6333/collections/{name}/points/count')
-                    if count_response.status_code == 200:
-                        count_data = count_response.json()
-                        count = count_data.get('result', {}).get('count', 0)
-                        print(f'   - {name}: {count:,} записей')
-                    else:
-                        print(f'   - {name}: статистика недоступна')
-                except:
-                    print(f'   - {name}: ошибка получения статистики')
-        else:
-            print('📭 Коллекции не найдены')
-    else:
-        print('❌ Ошибка получения списка коллекций')
-except Exception as e:
-    print(f'❌ Ошибка при проверке коллекций: {e}')
-" 2>/dev/null || echo "⚠️  Не удалось получить детальную информацию о коллекциях"
-            return 0
-        fi
-
-        echo "Попытка $attempt/$max_attempts..."
-        sleep 2
-        ((attempt++))
-    done
-
-    echo "❌ Ошибка: Qdrant не запустился в течение 60 секунд."
-    return 1
-}
-
-# Функция для проверки API
-check_api_status() {
-    local max_attempts=10
-    local attempt=1
-
-    echo "⏳ Проверка API..."
-
-    while [ $attempt -le $max_attempts ]; do
-        if curl -s http://localhost:8000/health > /dev/null 2>&1; then
-            echo "✅ API успешно запущен!"
-
-            # Получаем статус системы
-            echo "📊 Проверка состояния системы..."
-            python3 -c "
-import requests
-import json
-
-try:
-    response = requests.get('http://localhost:8000/status', timeout=10)
-    if response.status_code == 200:
-        data = response.json()
-
-        print(f'🔧 Статус компонентов:')
-        print(f'   - API: {data.get(\"api\", \"unknown\")}')
-        print(f'   - Qdrant: {data.get(\"qdrant\", \"unknown\")}')
-        print(f'   - Модели: {data.get(\"models\", \"unknown\")}')
-        print(f'   - КТРУ загружено: {data.get(\"ktru_loaded\", False)}')
-
-        collections = data.get('collections', {})
-        if collections:
-            print(f'📚 Коллекции:')
-            for name, info in collections.items():
-                count = info.get('vectors_count', 0)
-                size = info.get('vector_size', 0)
-                print(f'   - {name}: {count:,} векторов (размерность {size})')
-        else:
-            print('📭 Коллекции не найдены в статусе')
-    else:
-        print(f'⚠️  Статус API недоступен: {response.status_code}')
-except Exception as e:
-    print(f'⚠️  Ошибка при получении статуса: {e}')
-" 2>/dev/null || echo "⚠️  Не удалось получить детальную информацию о статусе"
-
-            return 0
-        fi
-
-        echo "Попытка $attempt/$max_attempts..."
-        sleep 3
-        ((attempt++))
-    done
-
-    echo "❌ API не отвечает"
-    return 1
-}
-
-# Проверка доступности Qdrant
-QDRANT_RUNNING=$(curl -s http://localhost:6333/collections > /dev/null && echo "yes" || echo "no")
-
-if [ "$QDRANT_RUNNING" = "no" ]; then
-    echo "🔄 Запуск Qdrant..."
-
-    # Проверяем наличие config.yaml, если нет - создаем базовый
+    # Создание конфига Qdrant
     if [ ! -f "./config.yaml" ]; then
-        echo "📝 Создание базовой конфигурации Qdrant..."
         cat > ./config.yaml << EOL
 storage:
-  storage_path: $PROJECT_DIR/qdrant_storage
+  storage_path: ./qdrant_storage
 service:
   host: 0.0.0.0
   http_port: 6333
@@ -213,121 +56,93 @@ log_level: INFO
 EOL
     fi
 
+    # Запуск Qdrant
     nohup ./qdrant --config-path ./config.yaml > ./logs/qdrant.log 2>&1 &
     QDRANT_PID=$!
+    echo "✅ Qdrant started (PID: $QDRANT_PID)"
 
-    # Проверка запуска Qdrant с детальной информацией
-    if ! check_qdrant_status; then
-        echo "❌ Критическая ошибка: Qdrant не запустился"
-        echo "📋 Логи Qdrant:"
-        tail -20 ./logs/qdrant.log
-        exit 1
+    # Ждем запуска
+    echo "⏳ Waiting for Qdrant..."
+    sleep 5
+else
+    echo "✅ Qdrant already running"
+fi
+
+# Проверка данных KTRU
+echo "📊 Checking KTRU data..."
+if [ ! -f "./data/ktru_data.json" ]; then
+    echo "⚠️  KTRU data not found!"
+    echo "Creating sample data..."
+    python load_data.py --create-sample
+    echo ""
+    echo "❗ Please add your KTRU data to ./data/ktru_data.json"
+    echo "   Then run: python load_data.py"
+else
+    # Проверяем загружены ли данные
+    VECTOR_COUNT=$(python -c "
+from vector_db import vector_db
+stats = vector_db.get_statistics()
+print(stats.get('total_vectors', 0))
+" 2>/dev/null || echo "0")
+
+    if [ "$VECTOR_COUNT" -eq "0" ]; then
+        echo "📥 Loading KTRU data..."
+        python load_data.py --json-file ./data/ktru_data.json
+    else
+        echo "✅ KTRU data loaded ($VECTOR_COUNT vectors)"
     fi
-else
-    echo "✅ Qdrant уже запущен."
-    check_qdrant_status
 fi
 
-# Создаем .env файл, если нужно
-if [ ! -f "./.env" ]; then
-    echo "📝 Создание .env файла..."
-    cat > ./.env << EOL
-QDRANT_HOST=localhost
-QDRANT_PORT=6333
-QDRANT_COLLECTION=ktru_codes
-MONGO_EXTERNAL_URI=${MONGO_EXTERNAL_URI:-mongodb://mongodb.angora-ide.ts.net:27017/parser?directConnection=true}
-MONGO_LOCAL_URI=mongodb://localhost:27017/
-MONGO_DB_NAME=${MONGO_DB_NAME:-parser}
-MONGO_COLLECTION=${MONGO_COLLECTION:-ktru}
-KTRU_JSON_PATH=${KTRU_JSON_PATH:-$PROJECT_DIR/data/ktru_data.json}
-ENABLE_JSON_FALLBACK=true
-API_HOST=0.0.0.0
-API_PORT=8000
-EMBEDDING_MODEL=cointegrated/rubert-tiny2
-LLM_BASE_MODEL=Open-Orca/Mistral-7B-OpenOrca
-LLM_ADAPTER_MODEL=IlyaGusev/saiga_mistral_7b_lora
-VECTOR_SIZE=312
-BATCH_SIZE=32
-TEMPERATURE=0.1
-TOP_P=0.95
-REPETITION_PENALTY=1.15
-MAX_NEW_TOKENS=100
-TOP_K=5
-EOL
-fi
-
-# Проверяем JSON файл КТРУ
-echo "📄 Проверка данных КТРУ..."
-if ! check_ktru_json; then
-    echo "⚠️  JSON файл с данными КТРУ не найден или поврежден"
-    echo "🔄 Система будет работать в режиме синхронизации с внешней MongoDB"
-    download_sample_json
-else
-    echo "✅ JSON файл КТРУ готов к использованию"
-fi
-
-# Запуск синхронизации с MongoDB в фоновом режиме
-echo "🔄 Запуск синхронизации данных КТРУ..."
-nohup python ./mongodb_sync.py > ./logs/mongodb_sync.log 2>&1 &
-SYNC_PID=$!
-echo "✅ Процесс синхронизации запущен с PID: $SYNC_PID"
-
-# Запуск API сервиса
-echo "🔄 Запуск API-сервиса..."
-nohup python ./api.py > ./logs/api.log 2>&1 &
+# Запуск API
+echo "🌐 Starting API server..."
+nohup python api.py > ./logs/api.log 2>&1 &
 API_PID=$!
-echo "✅ API-сервис запущен с PID: $API_PID"
+echo "✅ API started (PID: $API_PID)"
 
-# Ждем запуска API и проверяем статус
+# Ждем запуска API
 sleep 5
 
-if ! check_api_status; then
-    echo "❌ Критическая ошибка: API не запустился"
-    echo "📋 Логи API:"
-    tail -20 ./logs/api.log
-    exit 1
-fi
-
-# Обработка сигналов завершения
-trap 'echo "🛑 Завершение работы..."; kill $SYNC_PID $API_PID 2>/dev/null; exit' SIGINT SIGTERM
+# Проверка статуса
+echo ""
+echo "🔍 Checking system status..."
+curl -s http://localhost:8000/health | python -m json.tool || echo "⚠️ API not responding"
 
 echo ""
-echo "🎉 Все сервисы успешно запущены!"
-echo "=================================================="
+echo "✅ System is ready!"
+echo "========================================"
 echo "📍 Endpoints:"
-echo "   🏥 Health check: http://localhost:8000/health"
-echo "   📊 System status: http://localhost:8000/status"
-echo "   📚 Collections:   http://localhost:8000/collections"
-echo "   🤖 Classify:      http://localhost:8000/classify"
-echo "   🔍 Qdrant:        http://localhost:6333"
+echo "   - API: http://localhost:8000"
+echo "   - Docs: http://localhost:8000/docs"
+echo "   - Qdrant: http://localhost:6333"
 echo ""
-echo "📁 Логи в директории: $PROJECT_DIR/logs/"
-echo "🔧 Для проверки системы: cd $PROJECT_DIR && python system_status.py"
+echo "📋 Available commands:"
+echo "   - Test system: python test_system.py"
+echo "   - Load data: python load_data.py --json-file your_ktru.json"
+echo "   - Check logs: tail -f logs/*.log"
 echo ""
-echo "💡 Возможности загрузки данных:"
-echo "   📡 Автоматическая синхронизация с внешней MongoDB"
-echo "   📄 Fallback на локальный JSON файл (${KTRU_JSON_PATH:-$PROJECT_DIR/data/ktru_data.json})"
-echo ""
-echo "Для завершения нажмите Ctrl+C"
+echo "Press Ctrl+C to stop all services"
 
-# Бесконечный цикл для поддержания контейнера активным
+# Функция для остановки сервисов
+cleanup() {
+    echo ""
+    echo "🛑 Stopping services..."
+    [ ! -z "$API_PID" ] && kill $API_PID 2>/dev/null
+    [ ! -z "$QDRANT_PID" ] && kill $QDRANT_PID 2>/dev/null
+    echo "Goodbye!"
+    exit 0
+}
+
+# Обработка сигналов
+trap cleanup SIGINT SIGTERM
+
+# Бесконечный цикл
 while true; do
-    # Проверка, что процессы все еще работают
-    if ! ps -p $SYNC_PID > /dev/null 2>&1; then
-        echo "$(date): ⚠️  Процесс синхронизации остановлен. Перезапуск..."
-        nohup python ./mongodb_sync.py > ./logs/mongodb_sync.log 2>&1 &
-        SYNC_PID=$!
-    fi
-
-    if ! ps -p $API_PID > /dev/null 2>&1; then
-        echo "$(date): ⚠️  API-сервис остановлен. Перезапуск..."
-        nohup python ./api.py > ./logs/api.log 2>&1 &
-        API_PID=$!
-
-        # Проверяем что API снова заработал
-        sleep 5
-        check_api_status
-    fi
-
     sleep 60
+
+    # Проверка что API работает
+    if ! kill -0 $API_PID 2>/dev/null; then
+        echo "⚠️ API stopped, restarting..."
+        nohup python api.py > ./logs/api.log 2>&1 &
+        API_PID=$!
+    fi
 done
