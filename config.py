@@ -1,102 +1,60 @@
-"""
-Конфигурация для RAG KTRU классификатора
-Оптимизирована для RunPod с 24GB VRAM
-"""
-
 import os
 from pathlib import Path
+from typing import Optional
+from pydantic_settings import BaseSettings
+from dotenv import load_dotenv
 
-# Базовые пути
-BASE_DIR = Path("/workspace/rag-ktru-classifier")
-DATA_DIR = BASE_DIR / "data"
-MODELS_DIR = BASE_DIR / "models"
-LOGS_DIR = BASE_DIR / "logs"
-QDRANT_STORAGE = BASE_DIR / "qdrant_storage"
+load_dotenv()
 
-# Создание директорий
-for dir_path in [DATA_DIR, MODELS_DIR, LOGS_DIR, QDRANT_STORAGE]:
-    dir_path.mkdir(parents=True, exist_ok=True)
 
-# Настройки Qdrant
-QDRANT_HOST = os.getenv("QDRANT_HOST", "localhost")
-QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
-QDRANT_COLLECTION = "ktru_vectors"
+class Settings(BaseSettings):
+    # API Keys
+    openai_api_key: Optional[str] = os.getenv("OPENAI_API_KEY")
+    anthropic_api_key: Optional[str] = os.getenv("ANTHROPIC_API_KEY")
 
-# Настройки данных
-KTRU_JSON_PATH = DATA_DIR / "ktru_data.json"
+    # LLM Configuration
+    llm_provider: str = os.getenv("LLM_PROVIDER", "openai")
+    llm_model: str = os.getenv("LLM_MODEL", "gpt-4-turbo-preview")
+    llm_temperature: float = float(os.getenv("LLM_TEMPERATURE", "0.1"))
+    llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "2000"))
 
-# Настройки моделей для эмбеддингов
-# Используем multilingual-e5-base для баланса качества и скорости
-EMBEDDING_MODEL = "intfloat/multilingual-e5-base"
-VECTOR_SIZE = 768  # Размерность для e5-base
-BATCH_SIZE = 64  # Увеличиваем для GPU
+    # Embedding Configuration
+    embedding_model: str = os.getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+    embedding_dimension: int = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
+    embedding_batch_size: int = 32
 
-# Настройки LLM - используем квантизированную версию для эффективности
-LLM_MODEL = "TheBloke/Mistral-7B-Instruct-v0.2-GPTQ"  # 4-bit квантизация
-LLM_MAX_LENGTH = 2048
-LLM_TEMPERATURE = 0.1  # Низкая для детерминированности
-LLM_TOP_P = 0.95
-LLM_TOP_K = 50
+    # Vector Store Configuration
+    vector_store_type: str = os.getenv("VECTOR_STORE_TYPE", "qdrant")
+    qdrant_host: str = os.getenv("QDRANT_HOST", "localhost")
+    qdrant_port: int = int(os.getenv("QDRANT_PORT", "6333"))
+    qdrant_collection: str = os.getenv("QDRANT_COLLECTION", "ktru_codes")
 
-# Параметры поиска и классификации
-SEARCH_TOP_K = 50  # Количество кандидатов из векторного поиска
-RERANK_TOP_K = 10  # Количество кандидатов после ре-ранжирования
-MIN_CONFIDENCE = 0.85  # Минимальный порог уверенности
+    # API Configuration
+    api_host: str = os.getenv("API_HOST", "0.0.0.0")
+    api_port: int = int(os.getenv("API_PORT", "8000"))
+    api_workers: int = int(os.getenv("API_WORKERS", "4"))
 
-# API настройки
-API_HOST = "0.0.0.0"
-API_PORT = 8000
+    # Redis Configuration
+    redis_host: str = os.getenv("REDIS_HOST", "localhost")
+    redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
+    redis_ttl: int = int(os.getenv("REDIS_TTL", "3600"))
+    use_cache: bool = os.getenv("USE_CACHE", "false").lower() == "true"
 
-# Оптимизация производительности
-USE_GPU = True
-DEVICE = "cuda" if USE_GPU else "cpu"
-NUM_WORKERS = 4
-USE_CACHE = True
-CACHE_SIZE = 10000
+    # Paths
+    project_root: Path = Path(__file__).parent
+    data_dir: Path = project_root / "data"
+    log_dir: Path = project_root / "logs"
 
-# Логирование
-LOG_LEVEL = "INFO"
-LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    # Logging
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    log_file: str = os.getenv("LOG_FILE", "ktru_rag.log")
 
-# Веса для комбинирования методов
-WEIGHTS = {
-    "vector_similarity": 0.4,  # Векторное сходство
-    "keyword_match": 0.3,  # Совпадение ключевых слов
-    "fuzzy_match": 0.2,  # Нечеткое совпадение
-    "category_match": 0.1  # Совпадение категорий
-}
+    # Classification thresholds
+    confidence_threshold: float = 0.95
+    max_candidates: int = 10
 
-# Специальные правила для категорий
-CATEGORY_MAPPINGS = {
-    # Компьютерная техника
-    "компьютер": ["26.20.11", "26.20.13", "26.20.14"],
-    "ноутбук": ["26.20.11", "26.20.13"],
-    "монитор": ["26.20.17"],
-    "принтер": ["26.20.16", "28.23.22"],
-    "клавиатура": ["26.20.16"],
-    "мышь": ["26.20.16"],
+    class Config:
+        env_file = ".env"
 
-    # Канцелярские товары
-    "ручка": ["32.99.12", "32.99.13"],
-    "карандаш": ["32.99.15"],
-    "маркер": ["32.99.12"],
-    "степлер": ["25.99.23"],
-    "скрепки": ["25.93.18"],
 
-    # Бумажная продукция
-    "бумага": ["17.12.14", "17.23.12"],
-    "картон": ["17.12.42"],
-    "конверт": ["17.23.12"],
-
-    # Мебель
-    "стол": ["31.01.11", "31.09.11"],
-    "стул": ["31.01.11", "31.09.12"],
-    "кресло": ["31.01.12", "31.09.12"],
-    "шкаф": ["31.01.13", "31.09.13"],
-}
-
-# Стоп-слова для фильтрации
-STOP_WORDS = {
-    'и', 'в', 'на', 'с', 'по', 'для', 'или', 'под', 'над', 'все',
-    'при', 'без', 'до', 'из', 'к', 'от', 'об', 'о', 'у', 'за'
-}
+settings = Settings()
