@@ -5,15 +5,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Определяем базовую директорию проекта
-# Если запущено из /workspace/rag-ktru-classifier, используем текущую директорию
-# Если из другого места, пытаемся найти правильный путь
 current_dir = os.getcwd()
 if current_dir.endswith('rag-ktru-classifier'):
     BASE_DIR = current_dir
 elif os.path.exists('/workspace/rag-ktru-classifier'):
     BASE_DIR = "/workspace/rag-ktru-classifier"
 else:
-    # Fallback на текущую директорию
     BASE_DIR = current_dir
 
 print(f"Используется базовая директория: {BASE_DIR}")
@@ -50,20 +47,32 @@ MONGO_EXT_AUTHSOURCE = os.getenv("MONGO_EXT_AUTHSOURCE", "")
 KTRU_JSON_PATH = os.getenv("KTRU_JSON_PATH", os.path.join(DATA_DIR, "ktru_data.json"))
 ENABLE_JSON_FALLBACK = os.getenv("ENABLE_JSON_FALLBACK", "true").lower() == "true"
 
-# Настройки моделей
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "cointegrated/rubert-tiny2")
+# Настройки моделей - ОБНОВЛЕНО для лучшей точности
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "ai-forever/sbert_large_nlu_ru")  # Более точная модель
 LLM_BASE_MODEL = os.getenv("LLM_BASE_MODEL", "Open-Orca/Mistral-7B-OpenOrca")
 LLM_ADAPTER_MODEL = os.getenv("LLM_ADAPTER_MODEL", "IlyaGusev/saiga_mistral_7b_lora")
-VECTOR_SIZE = int(os.getenv("VECTOR_SIZE", "312"))  # Размерность векторов rubert-tiny2
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", "32"))     # Размер пакета для обработки данных
+VECTOR_SIZE = int(os.getenv("VECTOR_SIZE", "1024"))  # Размерность для sbert_large_nlu_ru
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "16"))     # Уменьшен для большей модели
 
 # Настройки API
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
 
-# Параметры генерации
-TEMPERATURE = float(os.getenv("TEMPERATURE", "0.1"))
-TOP_P = float(os.getenv("TOP_P", "0.95"))
-REPETITION_PENALTY = float(os.getenv("REPETITION_PENALTY", "1.15"))
+# Параметры генерации - ОПТИМИЗИРОВАНЫ для точности
+TEMPERATURE = float(os.getenv("TEMPERATURE", "0.05"))  # Еще меньше случайности
+TOP_P = float(os.getenv("TOP_P", "0.85"))            # Более строгий отбор
+REPETITION_PENALTY = float(os.getenv("REPETITION_PENALTY", "1.2"))
 MAX_NEW_TOKENS = int(os.getenv("MAX_NEW_TOKENS", "100"))
-TOP_K = int(os.getenv("TOP_K", "5"))  # Количество похожих КТРУ для поиска
+
+# Параметры поиска - УВЕЛИЧЕНЫ для лучшей точности
+TOP_K = int(os.getenv("TOP_K", "50"))  # Больше кандидатов для анализа
+
+# Пороги точности - ПОВЫШЕНЫ для требования 95%+
+SIMILARITY_THRESHOLD_HIGH = float(os.getenv("SIMILARITY_THRESHOLD_HIGH", "0.95"))  # Очень высокая схожесть
+SIMILARITY_THRESHOLD_MEDIUM = float(os.getenv("SIMILARITY_THRESHOLD_MEDIUM", "0.90"))  # Высокая схожесть
+SIMILARITY_THRESHOLD_LOW = float(os.getenv("SIMILARITY_THRESHOLD_LOW", "0.85"))  # Минимальный порог
+
+# Настройки классификации
+CLASSIFICATION_CONFIDENCE_THRESHOLD = float(os.getenv("CLASSIFICATION_CONFIDENCE_THRESHOLD", "0.95"))  # 95% уверенность
+ENABLE_ATTRIBUTE_MATCHING = os.getenv("ENABLE_ATTRIBUTE_MATCHING", "true").lower() == "true"
+ATTRIBUTE_WEIGHT = float(os.getenv("ATTRIBUTE_WEIGHT", "0.3"))  # Вес атрибутов в финальной оценке
