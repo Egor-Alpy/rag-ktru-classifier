@@ -35,31 +35,79 @@ def connect_to_mongodb(uri, db_name, collection_name):
         return None, None
 
 
-def prepare_ktru_text(ktru_entry):
-    """Подготовка текста для эмбеддинга из записи КТРУ"""
-    text_to_embed = f"{ktru_entry.get('ktru_code', '')} {ktru_entry.get('title', '')}"
+def prepare_ktru_text_enhanced(ktru_entry):
+    """Улучшенная подготовка текста для эмбеддинга из записи КТРУ"""
+    text_parts = []
 
-    # Добавляем описание, если оно есть
-    if 'description' in ktru_entry and ktru_entry['description']:
-        text_to_embed += f" {ktru_entry['description']}"
+    # Код и название - самые важные
+    if ktru_entry.get('ktru_code'):
+        text_parts.append(f"код КТРУ: {ktru_entry['ktru_code']}")
 
-    # Добавляем информацию об атрибутах
+    if ktru_entry.get('title'):
+        text_parts.append(f"название: {ktru_entry['title']}")
+
+    # Описание
+    if ktru_entry.get('description'):
+        text_parts.append(f"описание: {ktru_entry['description']}")
+
+    # Единица измерения
+    if ktru_entry.get('unit'):
+        text_parts.append(f"единица измерения: {ktru_entry['unit']}")
+
+    # Ключевые слова
+    if ktru_entry.get('keywords') and ktru_entry['keywords']:
+        keywords_text = ', '.join(ktru_entry['keywords'])
+        text_parts.append(f"ключевые слова: {keywords_text}")
+
+    # Обработка атрибутов с полной информацией
     if 'attributes' in ktru_entry and ktru_entry['attributes']:
+        attr_texts = []
+
         for attr in ktru_entry['attributes']:
             attr_name = attr.get('attr_name', '')
 
-            # Обрабатываем атрибуты с attr_values
+            # Обрабатываем атрибуты с attr_values (формат KTRU)
             if 'attr_values' in attr and attr['attr_values']:
+                values = []
                 for val in attr['attr_values']:
-                    value = val.get('value', '')
+                    value_text = val.get('value', '')
                     value_unit = val.get('value_unit', '')
-                    text_to_embed += f" {attr_name}: {value} {value_unit}".strip()
 
-            # Обрабатываем атрибуты с attr_value
+                    # Формируем полное значение с единицей измерения
+                    if value_unit and value_unit not in ['', 'Нет данных']:
+                        # Обрабатываем составные единицы измерения
+                        units = value_unit.split(';')
+                        unit_text = ' или '.join(u.strip() for u in units if u.strip())
+                        full_value = f"{value_text} {unit_text}"
+                    else:
+                        full_value = value_text
+
+                    values.append(full_value)
+
+                if values:
+                    attr_text = f"{attr_name}: {', '.join(values)}"
+                    attr_texts.append(attr_text)
+
+            # Обрабатываем атрибуты с attr_value (альтернативный формат)
             elif 'attr_value' in attr and attr['attr_value']:
-                text_to_embed += f" {attr_name}: {attr['attr_value']}"
+                attr_text = f"{attr_name}: {attr['attr_value']}"
+                attr_texts.append(attr_text)
 
-    return text_to_embed
+        if attr_texts:
+            text_parts.append("характеристики: " + '; '.join(attr_texts))
+
+    # Добавляем метаданные для улучшения поиска
+    # Извлекаем категорию из кода KTRU (первые цифры)
+    if ktru_entry.get('ktru_code'):
+        code_parts = ktru_entry['ktru_code'].split('.')
+        if len(code_parts) >= 2:
+            category_code = f"{code_parts[0]}.{code_parts[1]}"
+            text_parts.append(f"категория кода: {category_code}")
+
+    # Объединяем все части
+    full_text = ' | '.join(text_parts)
+
+    return full_text
 
 
 def setup_qdrant_collection():
@@ -133,7 +181,8 @@ def process_ktru_data():
             for _ in range(batch_size):
                 try:
                     ktru_entry = next(cursor)
-                    text_to_embed = prepare_ktru_text(ktru_entry)
+                    # Используем улучшенную функцию подготовки текста
+                    text_to_embed = prepare_ktru_text_enhanced(ktru_entry)
                     batch_texts.append(text_to_embed)
                     batch.append(ktru_entry)
                     batch_ids.append(processed_count)
@@ -150,17 +199,26 @@ def process_ktru_data():
             # Создаем записи для Qdrant
             points = []
             for i, (ktru_entry, embedding) in enumerate(zip(batch, batch_embeddings)):
+                # Сохраняем полную информацию в payload
+                payload = {
+                    "ktru_code": ktru_entry.get('ktru_code', ''),
+                    "title": ktru_entry.get('title', ''),
+                    "description": ktru_entry.get('description', ''),
+                    "unit": ktru_entry.get('unit', ''),
+                    "version": ktru_entry.get('version', ''),
+                    "keywords": ktru_entry.get('keywords', []),
+                    "attributes": ktru_entry.get('attributes', []),
+                    "source_link": ktru_entry.get('source_link', ''),
+                    "updated_at": str(ktru_entry.get('updated_at', ''))
+                }
+
+                # Добавляем дополнительное поле с текстом для поиска (для отладки)
+                payload['_search_text'] = batch_texts[i][:500]  # Первые 500 символов
+
                 points.append(rest.PointStruct(
                     id=batch_ids[i],
                     vector=embedding.tolist(),
-                    payload={
-                        "ktru_code": ktru_entry.get('ktru_code', ''),
-                        "title": ktru_entry.get('title', ''),
-                        "description": ktru_entry.get('description', ''),
-                        "unit": ktru_entry.get('unit', ''),
-                        "version": ktru_entry.get('version', ''),
-                        "attributes": ktru_entry.get('attributes', [])
-                    }
+                    payload=payload
                 ))
 
             # Загружаем точки в Qdrant
@@ -175,8 +233,17 @@ def process_ktru_data():
         logger.info(f"Обработка КТРУ завершена. Всего обработано {processed_count} записей.")
         logger.info(f"Время обработки: {elapsed_time:.2f} секунд")
 
+        # Проверяем результат
+        collection_info = qdrant_client.get_collection(QDRANT_COLLECTION)
+        count = qdrant_client.count(QDRANT_COLLECTION)
+        logger.info(f"📊 Финальная статистика коллекции {QDRANT_COLLECTION}:")
+        logger.info(f"   - Векторов в базе: {count.count:,}")
+        logger.info(f"   - Размерность: {collection_info.config.params.vectors.size}")
+
     except Exception as e:
         logger.error(f"Ошибка при обработке данных КТРУ: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
 
     finally:
         mongo_client.close()

@@ -2,7 +2,7 @@ import re
 import torch
 import json
 import logging
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from peft import AutoPeftModelForCausalLM
 from transformers import AutoTokenizer, GenerationConfig, LlamaTokenizer
 from qdrant_client import QdrantClient
@@ -34,12 +34,33 @@ class KtruClassifier:
 
         # Словарь для нормализации атрибутов
         self.attribute_normalization = {
-            "количество слоев": ["слойность", "число слоев", "слои"],
-            "цвет": ["окраска", "расцветка", "оттенок"],
+            # Общие атрибуты
+            "количество слоев": ["слойность", "число слоев", "слои", "слойный"],
+            "цвет": ["окраска", "расцветка", "оттенок", "цвет бумаги"],
             "тип": ["вид", "разновидность", "категория"],
             "материал": ["состав", "сырье", "основа"],
-            "размер": ["габарит", "величина", "формат"],
-            "назначение": ["применение", "использование", "цель"]
+            "размер": ["габарит", "величина", "формат", "размеры"],
+            "назначение": ["применение", "использование", "цель", "для"],
+
+            # Специфичные атрибуты
+            "объем": ["объём", "емкость", "вместимость", "объём реагента"],
+            "процессор": ["cpu", "чип", "микропроцессор"],
+            "память": ["ram", "озу", "оперативная память"],
+            "торговая марка": ["бренд", "производитель", "марка", "brand"],
+
+            # Единицы измерения
+            "штука": ["шт", "единица", "ед"],
+            "набор": ["комплект", "set", "kit"],
+            "упаковка": ["пачка", "пакет", "уп"],
+        }
+
+        # Важные слова для категорий товаров
+        self.category_keywords = {
+            "компьютер": ["ноутбук", "laptop", "notebook", "портативный компьютер", "пк", "pc"],
+            "бумага": ["туалетная", "офисная", "писчая", "копировальная"],
+            "реагент": ["ивд", "диагностика", "лабораторный", "анализатор"],
+            "канцелярия": ["ручка", "карандаш", "маркер", "фломастер"],
+            "мебель": ["стол", "стул", "шкаф", "тумба", "кресло"],
         }
 
     def _setup_qdrant(self):
@@ -142,8 +163,8 @@ class KtruClassifier:
 
         return attr_lower
 
-    def _extract_attributes(self, data: Dict) -> Dict[str, str]:
-        """Извлечение и нормализация атрибутов"""
+    def _extract_attributes(self, data: Dict) -> Dict[str, Set[str]]:
+        """Извлечение и нормализация атрибутов с поддержкой множественных значений"""
         attributes = {}
 
         if 'attributes' in data and isinstance(data['attributes'], list):
@@ -152,159 +173,254 @@ class KtruClassifier:
                     # Для SKU формат
                     if 'attr_name' in attr and 'attr_value' in attr:
                         name = self._normalize_attribute_name(attr['attr_name'])
-                        attributes[name] = str(attr['attr_value']).lower()
+                        value = str(attr['attr_value']).lower().strip()
+                        if name not in attributes:
+                            attributes[name] = set()
+                        attributes[name].add(value)
+
                     # Для KTRU формат
                     elif 'attr_name' in attr and 'attr_values' in attr:
                         name = self._normalize_attribute_name(attr['attr_name'])
-                        values = []
+                        if name not in attributes:
+                            attributes[name] = set()
+
                         for val in attr['attr_values']:
                             if isinstance(val, dict) and 'value' in val:
-                                values.append(str(val['value']).lower())
-                        if values:
-                            attributes[name] = '; '.join(values)
+                                value = str(val['value']).lower().strip()
+                                # Добавляем единицу измерения если есть
+                                if 'value_unit' in val and val['value_unit']:
+                                    unit = val['value_unit'].strip()
+                                    if unit:
+                                        value = f"{value} {unit}"
+                                attributes[name].add(value)
 
-        return attributes
+        # Конвертируем sets в строки для удобства
+        result = {}
+        for name, values in attributes.items():
+            result[name] = '; '.join(sorted(values))
+
+        return result
 
     def _calculate_attribute_similarity(self, sku_attrs: Dict[str, str], ktru_attrs: Dict[str, str]) -> float:
-        """Расчет схожести атрибутов"""
+        """Улучшенный расчет схожести атрибутов"""
         if not sku_attrs or not ktru_attrs:
             return 0.0
 
         matches = 0
         total_comparisons = 0
+        critical_matches = 0  # Для критически важных атрибутов
+
+        # Определяем критические атрибуты для разных категорий
+        critical_attributes = {
+            "тип", "количество слоев", "материал", "процессор", "память",
+            "объем", "назначение", "размер"
+        }
 
         # Проверяем совпадение атрибутов
         for sku_attr_name, sku_attr_value in sku_attrs.items():
             if sku_attr_name in ktru_attrs:
                 ktru_value = ktru_attrs[sku_attr_name]
                 total_comparisons += 1
+                is_critical = sku_attr_name in critical_attributes
 
-                # Точное совпадение
-                if sku_attr_value == ktru_value:
+                # Разбиваем значения на компоненты для сравнения
+                sku_values = set(v.strip() for v in sku_attr_value.split(';'))
+                ktru_values = set(v.strip() for v in ktru_value.split(';'))
+
+                # Точное совпадение хотя бы одного значения
+                if sku_values.intersection(ktru_values):
                     matches += 1
+                    if is_critical:
+                        critical_matches += 1
                 # Частичное совпадение
-                elif sku_attr_value in ktru_value or ktru_value in sku_attr_value:
-                    matches += 0.5
-                # Проверка на вхождение значений (для множественных значений)
-                elif ';' in ktru_value:
-                    ktru_values = [v.strip() for v in ktru_value.split(';')]
-                    if any(sku_attr_value in v or v in sku_attr_value for v in ktru_values):
-                        matches += 0.5
+                else:
+                    partial_match = False
+                    for sv in sku_values:
+                        for kv in ktru_values:
+                            # Проверка вхождения
+                            if sv in kv or kv in sv:
+                                partial_match = True
+                                break
+                            # Проверка числовых диапазонов
+                            if self._check_numeric_match(sv, kv):
+                                partial_match = True
+                                break
+                        if partial_match:
+                            break
+
+                    if partial_match:
+                        matches += 0.7 if is_critical else 0.5
 
         if total_comparisons == 0:
             return 0.0
 
-        return matches / total_comparisons
+        # Базовая схожесть
+        base_similarity = matches / total_comparisons
 
-    def _create_advanced_prompt(self, sku_data: Dict, similar_ktru_entries: List,
-                                sku_attrs: Dict[str, str]) -> str:
-        """Создание продвинутого промпта для классификации"""
-        prompt = """Ты эксперт по классификации товаров в системе КТРУ (Каталог товаров, работ, услуг).
-Твоя задача - найти ЕДИНСТВЕННЫЙ ТОЧНЫЙ код КТРУ для товара с уверенностью не менее 95%.
+        # Бонус за совпадение критических атрибутов
+        critical_bonus = critical_matches * 0.1
 
-КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА:
-1. Код КТРУ должен ТОЧНО соответствовать типу товара, а не просто быть похожим
-2. Проверь ВСЕ атрибуты товара - они должны соответствовать характеристикам КТРУ
-3. Если есть хоть малейшие сомнения в точности - отвечай "код не найден"
-4. НЕ выбирай код общей категории, если есть более специфичный код
-5. Учитывай ВСЕ детали: бренд, модель, технические характеристики
+        return min(1.0, base_similarity + critical_bonus)
+
+    def _check_numeric_match(self, value1: str, value2: str) -> bool:
+        """Проверка совпадения числовых значений с учетом диапазонов"""
+        try:
+            # Извлекаем числа из строк
+            nums1 = re.findall(r'[\d.]+', value1)
+            nums2 = re.findall(r'[\d.]+', value2)
+
+            if not nums1 or not nums2:
+                return False
+
+            # Проверяем диапазоны (≥, ≤, и т.д.)
+            if '≥' in value2 or '>=' in value2:
+                return float(nums1[0]) >= float(nums2[0])
+            elif '≤' in value2 or '<=' in value2:
+                return float(nums1[0]) <= float(nums2[0])
+            else:
+                # Точное совпадение с допуском 10%
+                num1 = float(nums1[0])
+                num2 = float(nums2[0])
+                return abs(num1 - num2) / max(num1, num2) < 0.1
+        except:
+            return False
+
+    def _create_search_text(self, sku_data: Dict, sku_attrs: Dict[str, str]) -> str:
+        """Создание оптимизированного текста для векторного поиска"""
+        text_parts = []
+
+        # Основная информация
+        if sku_data.get('title'):
+            text_parts.append(sku_data['title'])
+
+        if sku_data.get('category'):
+            text_parts.append(f"категория: {sku_data['category']}")
+
+        if sku_data.get('brand'):
+            text_parts.append(f"бренд: {sku_data['brand']}")
+
+        if sku_data.get('description'):
+            text_parts.append(sku_data['description'])
+
+        # Добавляем все атрибуты в структурированном виде
+        for attr_name, attr_value in sku_attrs.items():
+            text_parts.append(f"{attr_name}: {attr_value}")
+
+        # Добавляем ключевые слова категории
+        text_lower = ' '.join(text_parts).lower()
+        for category, keywords in self.category_keywords.items():
+            if any(kw in text_lower for kw in keywords):
+                text_parts.append(f"категория товара: {category}")
+
+        return ' '.join(text_parts)
+
+    def _create_classification_prompt(self, sku_data: Dict, similar_ktru_entries: List,
+                                      sku_attrs: Dict[str, str]) -> str:
+        """Создание улучшенного промпта для точной классификации"""
+        prompt = """Ты эксперт по классификации товаров в системе КТРУ. Твоя задача - найти ЕДИНСТВЕННЫЙ ТОЧНЫЙ код КТРУ.
+
+КРИТИЧЕСКИЕ ПРАВИЛА:
+1. Код должен ТОЧНО соответствовать товару по ВСЕМ характеристикам
+2. Проверь соответствие: тип товара, технические параметры, назначение, материалы
+3. НЕ выбирай похожий код - только ТОЧНОЕ соответствие
+4. Если есть сомнения - ответь "код не найден"
 
 ТОВАР ДЛЯ КЛАССИФИКАЦИИ:
 """
-
-        # Добавляем информацию о товаре
+        # Информация о товаре
         prompt += f"Название: {sku_data.get('title', '')}\n"
         if sku_data.get('description'):
-            prompt += f"Описание: {sku_data.get('description', '')}\n"
+            prompt += f"Описание: {sku_data['description']}\n"
         if sku_data.get('category'):
-            prompt += f"Категория: {sku_data.get('category', '')}\n"
+            prompt += f"Категория: {sku_data['category']}\n"
         if sku_data.get('brand'):
-            prompt += f"Бренд: {sku_data.get('brand', '')}\n"
+            prompt += f"Бренд: {sku_data['brand']}\n"
 
-        # Добавляем атрибуты
+        # Атрибуты товара
         if sku_attrs:
-            prompt += "\nАТРИБУТЫ ТОВАРА:\n"
-            for attr_name, attr_value in sku_attrs.items():
-                prompt += f"- {attr_name}: {attr_value}\n"
+            prompt += "\nХАРАКТЕРИСТИКИ ТОВАРА:\n"
+            for attr_name, attr_value in sorted(sku_attrs.items()):
+                prompt += f"• {attr_name}: {attr_value}\n"
 
-        prompt += "\nКАНДИДАТЫ ИЗ КТРУ (отсортированы по релевантности):\n"
+        prompt += "\nКАНДИДАТЫ КТРУ (отсортированы по релевантности):\n"
 
-        # Добавляем кандидатов с подробной информацией
-        for i, entry in enumerate(similar_ktru_entries[:10], 1):  # Топ-10 для анализа
+        # Добавляем топ-5 кандидатов с детальным анализом
+        for i, entry in enumerate(similar_ktru_entries[:5], 1):
             payload = entry.payload
             score = getattr(entry, 'score', 0)
             ktru_attrs = self._extract_attributes(payload)
             attr_similarity = self._calculate_attribute_similarity(sku_attrs, ktru_attrs)
 
-            prompt += f"\n{i}. КОД: {payload.get('ktru_code', '')}\n"
-            prompt += f"   НАЗВАНИЕ: {payload.get('title', '')}\n"
-            prompt += f"   СХОЖЕСТЬ ТЕКСТА: {score:.3f}\n"
-            prompt += f"   СХОЖЕСТЬ АТРИБУТОВ: {attr_similarity:.2f}\n"
+            prompt += f"\n{i}. Код: {payload.get('ktru_code', '')}\n"
+            prompt += f"   Название: {payload.get('title', '')}\n"
+            prompt += f"   Схожесть: текст={score:.3f}, атрибуты={attr_similarity:.2f}\n"
 
             if ktru_attrs:
-                prompt += "   АТРИБУТЫ КТРУ:\n"
-                for attr_name, attr_value in list(ktru_attrs.items())[:5]:  # Первые 5 атрибутов
-                    prompt += f"   - {attr_name}: {attr_value}\n"
+                prompt += "   Характеристики КТРУ:\n"
+                for attr_name, attr_value in sorted(ktru_attrs.items())[:5]:
+                    prompt += f"   • {attr_name}: {attr_value}\n"
 
         prompt += """
-ИНСТРУКЦИЯ ПО ВЫБОРУ:
-1. Найди кандидата, где название И атрибуты максимально точно соответствуют товару
-2. Если схожесть текста > 0.9 И схожесть атрибутов > 0.7 - это хороший кандидат
-3. Проверь, что ВСЕ ключевые характеристики товара есть в описании КТРУ
-4. Если несколько кандидатов подходят - выбери наиболее специфичный (не общую категорию)
-5. Если ни один кандидат не подходит с уверенностью 95% - ответь "код не найден"
+АЛГОРИТМ ВЫБОРА:
+1. Найди кандидата где ВСЕ ключевые характеристики совпадают
+2. Проверь что категория товара соответствует
+3. Убедись что технические параметры идентичны
+4. Если полного соответствия нет - код не найден
 
-ФОРМАТ ОТВЕТА:
-- Если найден точный код: выведи ТОЛЬКО код в формате XX.XX.XX.XXX-XXXXXXXX
-- Если код не найден: выведи ТОЛЬКО фразу "код не найден"
-
-ОТВЕТ:"""
+ОТВЕТ (только код или "код не найден"):"""
 
         return prompt
 
     def _validate_ktru_match(self, sku_data: Dict, ktru_data: Dict,
                              text_similarity: float, attr_similarity: float) -> Tuple[bool, float]:
-        """Валидация соответствия SKU и KTRU"""
-        # Базовая оценка уверенности
+        """Строгая валидация соответствия SKU и KTRU"""
         confidence = 0.0
 
-        # Вклад текстовой схожести (70%)
-        if text_similarity >= SIMILARITY_THRESHOLD_HIGH:
-            confidence += 0.7
-        elif text_similarity >= SIMILARITY_THRESHOLD_MEDIUM:
-            confidence += 0.5
-        elif text_similarity >= SIMILARITY_THRESHOLD_LOW:
-            confidence += 0.3
+        # Требуем высокую текстовую схожесть
+        if text_similarity >= 0.95:
+            confidence += 0.6
+        elif text_similarity >= 0.90:
+            confidence += 0.4
+        elif text_similarity >= 0.85:
+            confidence += 0.2
         else:
             return False, 0.0
 
-        # Вклад схожести атрибутов (30%)
-        if ENABLE_ATTRIBUTE_MATCHING:
-            confidence += attr_similarity * ATTRIBUTE_WEIGHT
+        # Атрибуты должны хорошо совпадать
+        if attr_similarity >= 0.8:
+            confidence += 0.4
+        elif attr_similarity >= 0.6:
+            confidence += 0.2
+        else:
+            confidence *= 0.5  # Снижаем общую уверенность
 
-        # Дополнительные проверки
-        sku_title_lower = sku_data.get('title', '').lower()
-        ktru_title_lower = ktru_data.get('title', '').lower()
+        # Проверка ключевых слов категории
+        sku_text = f"{sku_data.get('title', '')} {sku_data.get('description', '')}".lower()
+        ktru_text = f"{ktru_data.get('title', '')} {ktru_data.get('description', '')}".lower()
 
-        # Проверка ключевых слов
-        sku_keywords = set(sku_title_lower.split())
-        ktru_keywords = set(ktru_title_lower.split())
+        # Ищем общие значимые слова (длиннее 3 символов)
+        sku_words = set(w for w in sku_text.split() if len(w) > 3)
+        ktru_words = set(w for w in ktru_text.split() if len(w) > 3)
 
-        # Должно быть хотя бы 30% общих ключевых слов
-        if len(sku_keywords) > 0 and len(ktru_keywords) > 0:
-            common_keywords = sku_keywords.intersection(ktru_keywords)
-            keyword_overlap = len(common_keywords) / min(len(sku_keywords), len(ktru_keywords))
-            if keyword_overlap < 0.3:
-                confidence *= 0.7  # Снижаем уверенность
+        if sku_words and ktru_words:
+            word_overlap = len(sku_words.intersection(ktru_words)) / min(len(sku_words), len(ktru_words))
+            if word_overlap < 0.3:
+                confidence *= 0.6
 
-        # Проверка категории, если есть
+        # Проверка категории
         if 'category' in sku_data and sku_data['category']:
-            sku_category = sku_data['category'].lower()
-            if sku_category not in ktru_title_lower and sku_category not in ktru_data.get('description', '').lower():
-                confidence *= 0.8  # Снижаем уверенность
+            category_found = False
+            for cat_key, keywords in self.category_keywords.items():
+                if any(kw in sku_text for kw in keywords):
+                    if any(kw in ktru_text for kw in keywords):
+                        category_found = True
+                        break
 
-        # Финальная проверка
-        is_valid = confidence >= CLASSIFICATION_CONFIDENCE_THRESHOLD
+            if not category_found:
+                confidence *= 0.7
+
+        # Требуем очень высокую уверенность
+        is_valid = confidence >= 0.95
 
         return is_valid, confidence
 
@@ -321,20 +437,9 @@ class KtruClassifier:
             sku_attrs = self._extract_attributes(sku_data)
             logger.info(f"📋 Извлечено атрибутов SKU: {len(sku_attrs)}")
 
-            # Подготовка текста для эмбеддинга
-            sku_text_parts = [
-                sku_data.get('title', ''),
-                sku_data.get('description', ''),
-                sku_data.get('category', ''),
-                sku_data.get('brand', '')
-            ]
-
-            # Добавляем атрибуты
-            for attr_name, attr_value in sku_attrs.items():
-                sku_text_parts.append(f"{attr_name}: {attr_value}")
-
-            sku_text = ' '.join(filter(None, sku_text_parts))
-            logger.info(f"📝 Текст для поиска: {sku_text[:100]}...")
+            # Создаем оптимизированный текст для поиска
+            sku_text = self._create_search_text(sku_data, sku_attrs)
+            logger.info(f"📝 Текст для поиска (первые 200 символов): {sku_text[:200]}...")
 
             # Генерируем эмбеддинг
             sku_embedding = generate_embedding(sku_text)
@@ -344,19 +449,23 @@ class KtruClassifier:
             search_result = self.qdrant_client.search(
                 collection_name=QDRANT_COLLECTION,
                 query_vector=sku_embedding.tolist(),
-                limit=top_k
+                limit=top_k  # Берем больше кандидатов для анализа
             )
 
             if not search_result:
                 logger.warning("⚠️ Не найдено похожих КТРУ записей")
                 return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
 
-            # Анализ результатов
+            # Анализ результатов с более строгими критериями
             best_candidates = []
 
             for result in search_result:
                 score = getattr(result, 'score', 0)
                 payload = result.payload
+
+                # Пропускаем результаты с низкой схожестью
+                if score < 0.8:
+                    continue
 
                 # Извлекаем атрибуты KTRU
                 ktru_attrs = self._extract_attributes(payload)
@@ -380,7 +489,7 @@ class KtruClassifier:
             # Сортируем кандидатов по уверенности
             best_candidates.sort(key=lambda x: x['confidence'], reverse=True)
 
-            # Если есть кандидат с очень высокой уверенностью
+            # Если есть кандидат с очень высокой уверенностью (>=0.98)
             if best_candidates and best_candidates[0]['confidence'] >= 0.98:
                 best = best_candidates[0]
                 payload = best['result'].payload
@@ -391,85 +500,69 @@ class KtruClassifier:
                     "confidence": best['confidence']
                 }
 
-            # Если нет LLM модели и нет высокой уверенности
-            if not self.llm or not self.tokenizer:
-                if best_candidates:
-                    best = best_candidates[0]
-                    if best['confidence'] >= CLASSIFICATION_CONFIDENCE_THRESHOLD:
-                        payload = best['result'].payload
-                        return {
-                            "ktru_code": payload.get('ktru_code', 'код не найден'),
-                            "ktru_title": payload.get('title', None),
-                            "confidence": best['confidence']
-                        }
+            # Используем LLM для финального выбора среди кандидатов
+            if self.llm and self.tokenizer and len(search_result) > 0:
+                # Берем только топ результаты для LLM
+                top_results = search_result[:10]
 
-                logger.warning("⚠️ LLM модель недоступна и нет кандидатов с высокой уверенностью")
-                return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
+                prompt = self._create_classification_prompt(sku_data, top_results, sku_attrs)
+                logger.info(f"📋 Используем LLM для финальной классификации")
 
-            # Используем LLM для финального выбора
-            prompt = self._create_advanced_prompt(sku_data, search_result[:20], sku_attrs)
-            logger.info(f"📋 Длина промпта: {len(prompt)} символов")
+                # Токенизация промпта
+                inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
+                inputs = {k: v.to(self.llm.device) for k, v in inputs.items()}
 
-            # Токенизация промпта
-            inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=4096)
-            inputs = {k: v.to(self.llm.device) for k, v in inputs.items()}
-
-            # Настройка параметров генерации
-            generation_config = GenerationConfig(
-                temperature=TEMPERATURE,
-                top_p=TOP_P,
-                repetition_penalty=REPETITION_PENALTY,
-                max_new_tokens=MAX_NEW_TOKENS,
-                do_sample=True,
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id
-            )
-
-            # Генерация ответа
-            logger.info("🤖 Запуск LLM для классификации...")
-            with torch.no_grad():
-                generated_ids = self.llm.generate(
-                    **inputs,
-                    generation_config=generation_config
+                # Настройка параметров генерации для максимальной точности
+                generation_config = GenerationConfig(
+                    temperature=0.1,  # Очень низкая температура для детерминированности
+                    top_p=0.9,
+                    repetition_penalty=1.15,
+                    max_new_tokens=50,
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id
                 )
 
-            # Декодирование ответа
-            response = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-            response = response[len(prompt):].strip()
+                # Генерация ответа
+                with torch.no_grad():
+                    generated_ids = self.llm.generate(
+                        **inputs,
+                        generation_config=generation_config
+                    )
 
-            logger.info(f"🤖 Ответ LLM: '{response}'")
+                # Декодирование ответа
+                response = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+                response = response[len(prompt):].strip()
 
-            # Проверка на наличие КТРУ кода в ответе
-            ktru_match = self.ktru_pattern.search(response)
+                logger.info(f"🤖 Ответ LLM: '{response}'")
 
-            if ktru_match:
-                ktru_code = ktru_match.group(0)
+                # Проверка ответа
+                ktru_match = self.ktru_pattern.search(response)
 
-                # Находим этот код в результатах поиска для получения полной информации
-                for candidate in best_candidates:
-                    if candidate['result'].payload.get('ktru_code') == ktru_code:
-                        logger.info(f"✅ LLM выбрал код: {ktru_code} с уверенностью {candidate['confidence']:.3f}")
-                        return {
-                            "ktru_code": ktru_code,
-                            "ktru_title": candidate['result'].payload.get('title', None),
-                            "confidence": candidate['confidence']
-                        }
+                if ktru_match:
+                    ktru_code = ktru_match.group(0)
 
-                # Если код не найден в кандидатах, ищем в базе
-                ktru_title = self._find_ktru_title_by_code(ktru_code, search_result)
-                return {
-                    "ktru_code": ktru_code,
-                    "ktru_title": ktru_title,
-                    "confidence": 0.95  # Базовая уверенность для LLM
-                }
+                    # Находим информацию о выбранном коде
+                    for candidate in best_candidates:
+                        if candidate['result'].payload.get('ktru_code') == ktru_code:
+                            return {
+                                "ktru_code": ktru_code,
+                                "ktru_title": candidate['result'].payload.get('title', None),
+                                "confidence": candidate['confidence']
+                            }
 
-            elif "код не найден" in response.lower():
-                logger.info("❌ LLM не смог найти точное соответствие")
-                return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
+                    # Если код не в кандидатах, ищем в результатах поиска
+                    for result in search_result:
+                        if result.payload.get('ktru_code') == ktru_code:
+                            return {
+                                "ktru_code": ktru_code,
+                                "ktru_title": result.payload.get('title', None),
+                                "confidence": 0.95
+                            }
 
-            else:
-                logger.warning(f"⚠️ Неопределенный ответ LLM: '{response}'")
-                return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
+            # Если ничего не найдено с высокой уверенностью
+            logger.info("❌ Не найдено точное соответствие КТРУ")
+            return {"ktru_code": "код не найден", "ktru_title": None, "confidence": 0.0}
 
         except Exception as e:
             logger.error(f"❌ Ошибка при классификации SKU: {e}")
