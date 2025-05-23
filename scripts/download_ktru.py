@@ -213,14 +213,14 @@ def save_ktru_data(ktru_data: List[Dict[str, Any]], output_dir: Path):
     """Save KTRU data to files"""
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save as JSON
-    json_path = output_dir / "ktru_codes.json"
+    # Save as JSON with the correct filename
+    json_path = output_dir / "ktru_data.json"  # Изменено с ktru_codes.json
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(ktru_data, f, ensure_ascii=False, indent=2)
     logger.info(f"Saved to {json_path}")
 
     # Save as CSV
-    csv_path = output_dir / "ktru_codes.csv"
+    csv_path = output_dir / "ktru_data.csv"  # Изменено с ktru_codes.csv
     df = pd.DataFrame(ktru_data)
     df.to_csv(csv_path, index=False, encoding="utf-8")
     logger.info(f"Saved to {csv_path}")

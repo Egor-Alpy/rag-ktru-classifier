@@ -7,6 +7,7 @@ from models.schemas import (
 from services.classifier import get_classifier_service
 from services.vector_store import get_vector_store
 from services.embeddings import get_embedding_service
+from config import settings  # Добавлен импорт
 from loguru import logger
 import numpy as np
 

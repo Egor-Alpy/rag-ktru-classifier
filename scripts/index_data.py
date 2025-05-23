@@ -46,7 +46,7 @@ def create_embeddings_batch(
 def main():
     """Main indexing function"""
     # Load KTRU data
-    data_path = settings.data_dir / "ktru_codes.json"
+    data_path = settings.data_dir / "ktru_data.json"  # Изменено с ktru_codes.json
 
     if not data_path.exists():
         logger.error(f"Data file not found: {data_path}")
